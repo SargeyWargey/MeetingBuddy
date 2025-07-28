@@ -302,6 +302,9 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
             throw TranscriptionError.serviceUnavailable
         }
         
+        // Validate audio file before processing
+        try validateAudioFile(recording)
+        
         // Determine transcription method based on availability and preference
         let useOnDevice = isOnDeviceAvailable && (preferOnDevice || !isOnline)
         
@@ -344,7 +347,7 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
         }
     }
     
-    /// Converts SFSpeechRecognizer errors to TranscriptionError
+    /// Converts SFSpeechRecognizer errors to TranscriptionError with enhanced detection
     private func convertSpeechError(_ error: Error) -> TranscriptionError {
         // Handle NSError cases
         if let nsError = error as NSError? {
@@ -356,12 +359,25 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
                 case 2:  // SFSpeechErrorCodeRequestNotAuthorized
                     return .permissionDenied
                 case 3:  // SFSpeechErrorCodeRequestUnsupported
+                    // Check if it's a language support issue
+                    if nsError.localizedDescription.lowercased().contains("language") {
+                        return .languageNotSupported
+                    }
                     return .serviceUnavailable
                 case 4:  // SFSpeechErrorCodeRequestTimedOut
                     return .processingTimeout
                 case 5:  // SFSpeechErrorCodeRequestCancelled
                     return .unknownError("Transcription was cancelled")
                 case 6:  // SFSpeechErrorCodeRequestFailed
+                    // Check for specific failure reasons
+                    let description = nsError.localizedDescription.lowercased()
+                    if description.contains("no speech") || description.contains("silence") {
+                        return .noSpeechDetected
+                    } else if description.contains("too short") {
+                        return .audioTooShort
+                    } else if description.contains("too long") {
+                        return .audioTooLong
+                    }
                     return .serviceUnavailable
                 case 7:  // SFSpeechErrorCodeRequestNetworkUnavailable
                     return .networkUnavailable
@@ -375,15 +391,109 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
             // Handle other error domains
             switch nsError.domain {
             case NSURLErrorDomain:
-                return .networkUnavailable
+                // More specific network error handling
+                switch nsError.code {
+                case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost:
+                    return .networkUnavailable
+                case NSURLErrorTimedOut:
+                    return .processingTimeout
+                default:
+                    return .networkUnavailable
+                }
+                
             case "AVAudioSessionErrorDomain":
-                return .audioFormatUnsupported
+                switch nsError.code {
+                case 1852797029: // kAudioSessionUnsupportedFormatError
+                    return .audioFormatUnsupported
+                case 1936290409: // kAudioSessionIncompatibleCategory
+                    return .microphoneUnavailable
+                default:
+                    return .audioFormatUnsupported
+                }
+                
+            case NSCocoaErrorDomain:
+                switch nsError.code {
+                case NSFileReadNoSuchFileError:
+                    return .audioFileNotFound
+                case NSFileReadNoPermissionError:
+                    return .permissionDenied
+                case NSFileReadCorruptFileError:
+                    return .audioFormatUnsupported
+                default:
+                    return .unknownError("File system error: \(error.localizedDescription)")
+                }
+                
+            case "NSOSStatusErrorDomain":
+                // Audio-related OS status errors
+                switch nsError.code {
+                case -50: // paramErr
+                    return .audioFormatUnsupported
+                case -43: // fnfErr (file not found)
+                    return .audioFileNotFound
+                case -34: // dskFulErr (disk full)
+                    return .deviceStorageFull
+                default:
+                    return .unknownError("System error: \(error.localizedDescription)")
+                }
+                
             default:
                 return .unknownError("Unknown error: \(error.localizedDescription)")
             }
         }
         
+        // Handle specific error types
+        if error.localizedDescription.lowercased().contains("storage") ||
+           error.localizedDescription.lowercased().contains("disk full") {
+            return .deviceStorageFull
+        }
+        
+        if error.localizedDescription.lowercased().contains("microphone") {
+            return .microphoneUnavailable
+        }
+        
         return .unknownError("Unexpected error: \(error.localizedDescription)")
+    }
+    
+    /// Validates audio file before transcription
+    private func validateAudioFile(_ recording: Recording) throws {
+        // Check if file exists
+        guard FileManager.default.fileExists(atPath: recording.url.path) else {
+            throw TranscriptionError.audioFileNotFound
+        }
+        
+        // Check file size and duration constraints
+        if recording.duration < 1.0 {
+            throw TranscriptionError.audioTooShort
+        }
+        
+        if recording.duration > 600.0 { // 10 minutes
+            throw TranscriptionError.audioTooLong
+        }
+        
+        // Check available storage space
+        if let attributes = try? FileManager.default.attributesOfFileSystem(forPath: recording.url.path),
+           let freeSize = attributes[.systemFreeSize] as? NSNumber {
+            let freeBytes = freeSize.int64Value
+            let requiredBytes: Int64 = 100_000_000 // 100MB minimum
+            
+            if freeBytes < requiredBytes {
+                throw TranscriptionError.deviceStorageFull
+            }
+        }
+        
+        // Validate audio format
+        do {
+            let audioFile = try AVAudioFile(forReading: recording.url)
+            let format = audioFile.fileFormat
+            
+            // Check if format is supported - simplified check for basic audio formats
+            if format.sampleRate <= 0 || format.channelCount <= 0 {
+                throw TranscriptionError.audioFormatUnsupported
+            }
+            
+        } catch {
+            throw TranscriptionError.audioFormatUnsupported
+        }
     }
 }
 

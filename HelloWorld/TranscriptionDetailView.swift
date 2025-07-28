@@ -243,39 +243,57 @@ struct TranscriptionDetailView: View {
     @ViewBuilder
     private var failedTranscriptionView: some View {
         VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 40))
-                .foregroundColor(.red)
-            
-            Text("Transcription Failed")
-                .font(.headline)
-                .foregroundColor(.red)
-            
-            if let error = recording.transcriptionError {
-                Text(error)
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            } else {
-                Text("An error occurred while transcribing your audio. Please try again.")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            
-            Button(action: retryTranscription) {
-                if isRetrying {
-                    HStack {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Retrying...")
+            // Check if we have a specific error from the error handler
+            let errorBanners = recordingManager.errorHandler?.getErrorBanners(for: recording.id) ?? []
+            if let latestBanner = errorBanners.last {
+                
+                TranscriptionErrorView(
+                    error: latestBanner.error,
+                    recording: recording,
+                    onAction: { action in
+                        recordingManager.errorHandler?.processErrorAction(action, for: latestBanner.error, recordingId: recording.id)
+                    },
+                    onDismiss: {
+                        recordingManager.errorHandler?.processErrorAction(.dismiss, for: latestBanner.error, recordingId: recording.id)
                     }
+                )
+                
+            } else {
+                // Fallback to generic error display
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 40))
+                    .foregroundColor(.red)
+                
+                Text("Transcription Failed")
+                    .font(.headline)
+                    .foregroundColor(.red)
+                
+                if let error = recording.transcriptionError {
+                    Text(error)
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
                 } else {
-                    Label("Retry Transcription", systemImage: "arrow.clockwise")
+                    Text("An error occurred while transcribing your audio. Please try again.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
                 }
+                
+                Button(action: retryTranscription) {
+                    if isRetrying {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Retrying...")
+                        }
+                    } else {
+                        Label("Retry Transcription", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isRetrying)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(isRetrying)
         }
         .padding()
     }

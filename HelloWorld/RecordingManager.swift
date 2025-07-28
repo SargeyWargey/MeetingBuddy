@@ -13,6 +13,7 @@ class RecordingManager: NSObject, ObservableObject {
     @Published var transcriptionService: TranscriptionService?
     @Published var isTranscriptionAvailable = false
     @Published var transcriptionPermissionGranted = false
+    @Published var errorHandler: TranscriptionErrorHandler!
     
     private var audioRecorder: AVAudioRecorder?
     private var audioPlayer: AVAudioPlayer?
@@ -25,10 +26,12 @@ class RecordingManager: NSObject, ObservableObject {
     override init() {
         super.init()
         
-        // Initialize transcription service on main actor
+        // Initialize transcription service and error handler on main actor
         Task { @MainActor in
+            self.errorHandler = TranscriptionErrorHandler()
             self.transcriptionService = TranscriptionService()
             self.setupTranscriptionService()
+            self.setupErrorHandlerNotifications()
         }
         
         loadRecordings()
@@ -50,7 +53,72 @@ class RecordingManager: NSObject, ObservableObject {
                 let granted = await service.requestPermissions()
                 await MainActor.run {
                     self.transcriptionPermissionGranted = granted
+                    if !granted {
+                        let error = TranscriptionError.permissionDenied
+                        self.errorHandler.handleError(error, for: UUID(), context: "Initial permission request")
+                    }
                 }
+            }
+        }
+    }
+    
+    @MainActor
+    private func setupErrorHandlerNotifications() {
+        // Listen for auto-retry notifications
+        NotificationCenter.default.addObserver(
+            forName: .transcriptionAutoRetry,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let userInfo = notification.userInfo,
+                  let recordingId = userInfo["recordingId"] as? UUID,
+                  let recording = self?.getRecording(by: recordingId) else { return }
+            
+            self?.performAutoRetry(for: recording)
+        }
+        
+        // Listen for manual retry notifications
+        NotificationCenter.default.addObserver(
+            forName: .transcriptionManualRetry,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let userInfo = notification.userInfo,
+                  let recordingId = userInfo["recordingId"] as? UUID,
+                  let recording = self?.getRecording(by: recordingId) else { return }
+            
+            self?.retryTranscription(recording)
+        }
+        
+        // Listen for offline queue notifications
+        NotificationCenter.default.addObserver(
+            forName: .queueTranscriptionForOffline,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let userInfo = notification.userInfo,
+                  let recordingId = userInfo["recordingId"] as? UUID,
+                  let recording = self?.getRecording(by: recordingId) else { return }
+            
+            Task { @MainActor in
+                self?.queueTranscription(recording)
+            }
+        }
+    }
+    
+    private func performAutoRetry(for recording: Recording) {
+        Task {
+            do {
+                let service = await MainActor.run { self.transcriptionService }
+                guard let service = service else {
+                    await handleTranscriptionError(recordingId: recording.id, error: TranscriptionError.serviceUnavailable)
+                    return
+                }
+                
+                let result = try await service.retryTranscription(recording)
+                await handleTranscriptionSuccess(recordingId: recording.id, result: result)
+            } catch {
+                await handleTranscriptionError(recordingId: recording.id, error: error)
             }
         }
     }
@@ -129,7 +197,8 @@ class RecordingManager: NSObject, ObservableObject {
         isRecording = false
         
         if let url = audioRecorder?.url {
-            let duration = audioRecorder?.currentTime ?? 0
+            // Calculate actual duration from the audio file
+            let duration = getAudioFileDuration(url: url)
             let recording = Recording(
                 fileName: url.lastPathComponent,
                 url: url,
@@ -185,6 +254,24 @@ class RecordingManager: NSObject, ObservableObject {
     
     private func getDocumentsDirectory() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+    
+    private func getAudioFileDuration(url: URL) -> TimeInterval {
+        do {
+            let audioFile = try AVAudioFile(forReading: url)
+            let frameCount = audioFile.length
+            let sampleRate = audioFile.fileFormat.sampleRate
+            return Double(frameCount) / sampleRate
+        } catch {
+            // Fallback to using AVAudioPlayer if AVAudioFile fails
+            do {
+                let audioPlayer = try AVAudioPlayer(contentsOf: url)
+                return audioPlayer.duration
+            } catch {
+                print("Failed to get audio duration: \(error)")
+                return 0
+            }
+        }
     }
     
     private func saveRecordings() {
@@ -352,6 +439,9 @@ class RecordingManager: NSObject, ObservableObject {
         recordings[index].transcriptionError = nil
         recordings[index].lastTranscriptionAttempt = result.completedAt
         
+        // Notify error handler of success to clear error state
+        errorHandler.handleSuccess(for: recordingId)
+        
         saveRecordings()
     }
     
@@ -364,13 +454,17 @@ class RecordingManager: NSObject, ObservableObject {
         recordings[index].transcriptionStatus = .failed
         recordings[index].lastTranscriptionAttempt = Date()
         
-        if let transcriptionError = error as? TranscriptionError {
-            recordings[index].transcriptionError = transcriptionError.localizedDescription
-            errorMessage = transcriptionError.localizedDescription
+        let transcriptionError: TranscriptionError
+        if let tError = error as? TranscriptionError {
+            transcriptionError = tError
+            recordings[index].transcriptionError = tError.errorDescription
         } else {
+            transcriptionError = TranscriptionError.unknownError(error.localizedDescription)
             recordings[index].transcriptionError = error.localizedDescription
-            errorMessage = "Transcription failed: \(error.localizedDescription)"
         }
+        
+        // Use the error handler for comprehensive error management
+        errorHandler.handleError(transcriptionError, for: recordingId, context: "Transcription failed")
         
         saveRecordings()
     }

@@ -8,15 +8,17 @@
 import SwiftUI
 
 struct ContentView: View {
+    @StateObject private var recordingManager = RecordingManager()
+    
     var body: some View {
         TabView {
-            RecordingView()
+            RecordingView(recordingManager: recordingManager)
                 .tabItem {
                     Image(systemName: "mic.circle")
                     Text("Record")
                 }
             
-            RecordingsListView()
+            RecordingsListView(recordingManager: recordingManager)
                 .tabItem {
                     Image(systemName: "list.bullet")
                     Text("Recordings")

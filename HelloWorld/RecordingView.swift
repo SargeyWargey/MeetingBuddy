@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RecordingView: View {
-    @StateObject private var recordingManager = RecordingManager()
+    @ObservedObject var recordingManager: RecordingManager
     @State private var showingPermissionDenied = false
     
     var body: some View {

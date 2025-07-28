@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct RecordingsListView: View {
-    @StateObject private var recordingManager = RecordingManager()
+    @ObservedObject var recordingManager: RecordingManager
     @State private var showingDeleteAlert = false
     @State private var recordingToDelete: Recording?
     @State private var searchText = ""
@@ -45,12 +45,12 @@ struct RecordingsListView: View {
             }
             .navigationTitle("Recordings")
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .primaryAction) {
                     networkStatusIndicator
                 }
             }
             .searchable(text: $searchText, isPresented: $isSearching, prompt: "Search transcriptions...")
-            .onChange(of: searchText) { _ in
+            .onChange(of: searchText) {
                 // Trigger UI update when search text changes
             }
             .alert("Delete Recording", isPresented: $showingDeleteAlert) {
@@ -63,6 +63,20 @@ struct RecordingsListView: View {
             } message: {
                 Text("Are you sure you want to delete this recording? This action cannot be undone.")
             }
+            .transcriptionErrorAlert(
+                error: Binding<TranscriptionError?>(
+                    get: { recordingManager.errorHandler?.currentError },
+                    set: { recordingManager.errorHandler?.currentError = $0 }
+                ),
+                onAction: { action in
+                    // Handle error actions - we need a recording ID, so we'll use a placeholder for now
+                    // In a real implementation, we'd track which recording the error is for
+                    if let errorHandler = recordingManager.errorHandler,
+                       let currentError = errorHandler.currentError {
+                        errorHandler.processErrorAction(action, for: currentError, recordingId: UUID())
+                    }
+                }
+            )
         }
     }
     
@@ -282,19 +296,35 @@ struct RecordingRowView: View {
             }
         
         case .failed:
-            Button(action: {
-                showingTranscriptionDetail = true
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundColor(.red)
-                    Text("Transcription failed - tap to view details")
-                        .font(.caption)
-                        .foregroundColor(.red)
+            VStack(alignment: .leading, spacing: 4) {
+                Button(action: {
+                    showingTranscriptionDetail = true
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                        Text("Transcription failed - tap to view details")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+                .buttonStyle(PlainButtonStyle())
+                
+                // Show compact error view if there are error banners for this recording
+                let errorBanners = recordingManager.errorHandler?.getErrorBanners(for: recording.id) ?? []
+                if let latestBanner = errorBanners.last {
+                    CompactTranscriptionErrorView(
+                        error: latestBanner.error,
+                        onRetry: {
+                            recordingManager.errorHandler?.processErrorAction(.retry, for: latestBanner.error, recordingId: recording.id)
+                        },
+                        onDismiss: {
+                            recordingManager.errorHandler?.processErrorAction(.dismiss, for: latestBanner.error, recordingId: recording.id)
+                        }
+                    )
                 }
             }
-            .buttonStyle(PlainButtonStyle())
         }
     }
     
