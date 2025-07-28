@@ -281,4 +281,335 @@ final class TranscriptionUITests: XCTestCase {
             }
         }
     }
-}
+    
+    // MARK: - TranscriptionDetailView Tests
+    
+    @MainActor
+    func testTranscriptionDetailViewNavigation() throws {
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Look for view transcription button or transcription text that can be tapped
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                // Should open the transcription detail view
+                let transcriptionDetailView = app.navigationBars["Transcription"]
+                XCTAssertTrue(transcriptionDetailView.waitForExistence(timeout: 3), "Should navigate to transcription detail view")
+                
+                // Should have a Done button
+                let doneButton = transcriptionDetailView.buttons["Done"]
+                XCTAssertTrue(doneButton.exists, "Should have Done button in navigation bar")
+                
+                // Close the detail view
+                doneButton.tap()
+            }
+        }
+    }
+    
+    @MainActor
+    func testTranscriptionDetailViewContent() throws {
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Navigate to detail view
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                let detailView = app.scrollViews.firstMatch
+                XCTAssertTrue(detailView.waitForExistence(timeout: 3), "Detail view should exist")
+                
+                // Check for recording info section
+                let recordingTitle = detailView.staticTexts.matching(NSPredicate(format: "label CONTAINS 'Recording'")).firstMatch
+                XCTAssertTrue(recordingTitle.exists, "Should display recording title")
+                
+                // Check for transcription section
+                let transcriptionHeading = detailView.staticTexts["Transcription"]
+                XCTAssertTrue(transcriptionHeading.exists, "Should have Transcription heading")
+                
+                // Check for status badge
+                let statusLabels = ["Completed", "In Progress", "Failed", "Queued", "Not Started"]
+                var foundStatus = false
+                for status in statusLabels {
+                    if detailView.staticTexts[status].exists {
+                        foundStatus = true
+                        break
+                    }
+                }
+                XCTAssertTrue(foundStatus, "Should display transcription status")
+                
+                // Close detail view
+                let doneButton = app.navigationBars["Transcription"].buttons["Done"]
+                doneButton.tap()
+            }
+        }
+    }
+    
+    @MainActor
+    func testTranscriptionDetailViewCopyFunctionality() throws {
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Navigate to detail view
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                // Test toolbar copy button
+                let copyButton = app.navigationBars["Transcription"].buttons.matching(NSPredicate(format: "label CONTAINS 'Copy'")).firstMatch
+                if copyButton.exists {
+                    copyButton.tap()
+                    
+                    // Should show copy confirmation alert
+                    let copyAlert = app.alerts["Copied to Clipboard"]
+                    XCTAssertTrue(copyAlert.waitForExistence(timeout: 2), "Should show copy confirmation alert")
+                    
+                    let okButton = copyAlert.buttons["OK"]
+                    okButton.tap()
+                }
+                
+                // Test copy button in content area
+                let contentCopyButton = app.buttons["Copy Text"]
+                if contentCopyButton.exists {
+                    contentCopyButton.tap()
+                    
+                    let copyAlert = app.alerts["Copied to Clipboard"]
+                    XCTAssertTrue(copyAlert.waitForExistence(timeout: 2), "Should show copy confirmation alert")
+                    
+                    let okButton = copyAlert.buttons["OK"]
+                    okButton.tap()
+                }
+                
+                // Close detail view
+                let doneButton = app.navigationBars["Transcription"].buttons["Done"]
+                doneButton.tap()
+            }
+        }
+    }
+    
+    @MainActor
+    func testTranscriptionDetailViewRetryFunctionality() throws {
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Navigate to detail view (could be failed transcription)
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                // Look for retry buttons
+                let retryButtons = [
+                    app.buttons["Retry Transcription"],
+                    app.buttons["Retry"],
+                    app.buttons["Start Transcription"],
+                    app.buttons["Process Now"]
+                ]
+                
+                for retryButton in retryButtons {
+                    if retryButton.exists {
+                        retryButton.tap()
+                        
+                        // Should show some progress indication or state change
+                        let progressIndicator = app.activityIndicators.firstMatch
+                        let retryingText = app.staticTexts["Retrying..."]
+                        let startingText = app.staticTexts["Starting..."]
+                        
+                        let hasProgressFeedback = progressIndicator.exists || retryingText.exists || startingText.exists
+                        XCTAssertTrue(hasProgressFeedback, "Should show progress feedback after retry")
+                        
+                        break
+                    }
+                }
+                
+                // Close detail view
+                let doneButton = app.navigationBars["Transcription"].buttons["Done"]
+                doneButton.tap()
+            }
+        }
+    }
+    
+    @MainActor
+    func testTranscriptionDetailViewMetadataSection() throws {
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Navigate to detail view
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                let detailView = app.scrollViews.firstMatch
+                
+                // Check for metadata section (only visible for completed transcriptions)
+                let metadataHeading = detailView.staticTexts["Transcription Details"]
+                if metadataHeading.exists {
+                    // Check for metadata fields
+                    let metadataFields = [
+                        "Status",
+                        "Last Attempt",
+                        "Method",
+                        "Confidence",
+                        "Processing Time",
+                        "Word Count",
+                        "Character Count"
+                    ]
+                    
+                    var foundMetadataFields = 0
+                    for field in metadataFields {
+                        if detailView.staticTexts[field].exists {
+                            foundMetadataFields += 1
+                        }
+                    }
+                    
+                    XCTAssertGreaterThan(foundMetadataFields, 0, "Should display at least one metadata field")
+                }
+                
+                // Close detail view
+                let doneButton = app.navigationBars["Transcription"].buttons["Done"]
+                doneButton.tap()
+            }
+        }
+    }
+    
+    @MainActor
+    func testTranscriptionDetailViewEmptyState() throws {
+        // This test would ideally be run with a recording that has completed transcription but no text
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Navigate to detail view
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                let detailView = app.scrollViews.firstMatch
+                
+                // Check for empty state elements
+                let emptyStateTexts = [
+                    "No Transcription Available",
+                    "Not Transcribed",
+                    "Transcription Failed"
+                ]
+                
+                var foundEmptyState = false
+                for text in emptyStateTexts {
+                    if detailView.staticTexts[text].exists {
+                        foundEmptyState = true
+                        break
+                    }
+                }
+                
+                // If we found an empty state, check for appropriate action buttons
+                if foundEmptyState {
+                    let actionButtons = [
+                        app.buttons["Retry Transcription"],
+                        app.buttons["Start Transcription"]
+                    ]
+                    
+                    var foundActionButton = false
+                    for button in actionButtons {
+                        if button.exists {
+                            foundActionButton = true
+                            break
+                        }
+                    }
+                    
+                    XCTAssertTrue(foundActionButton, "Empty state should have action button")
+                }
+                
+                // Close detail view
+                let doneButton = app.navigationBars["Transcription"].buttons["Done"]
+                doneButton.tap()
+            }
+        }
+    }
+    
+    @MainActor
+    func testTranscriptionDetailViewAccessibility() throws {
+        // Navigate to recordings tab
+        let recordingsTab = app.tabBars.buttons["Recordings"]
+        if recordingsTab.exists {
+            recordingsTab.tap()
+        }
+        
+        let recordingsList = app.scrollViews.firstMatch
+        if recordingsList.exists && recordingsList.cells.count > 0 {
+            let firstCell = recordingsList.cells.firstMatch
+            
+            // Navigate to detail view
+            let viewTranscriptionButton = firstCell.buttons["View transcription"]
+            if viewTranscriptionButton.exists {
+                viewTranscriptionButton.tap()
+                
+                // Check accessibility of navigation elements
+                let doneButton = app.navigationBars["Transcription"].buttons["Done"]
+                XCTAssertTrue(doneButton.exists, "Done button should be accessible")
+                
+                let copyButton = app.navigationBars["Transcription"].buttons.matching(NSPredicate(format: "label CONTAINS 'Copy'")).firstMatch
+                if copyButton.exists {
+                    XCTAssertTrue(copyButton.isHittable, "Copy button should be accessible")
+                }
+                
+                // Check accessibility of action buttons
+                let actionButtons = [
+                    app.buttons["Copy Text"],
+                    app.buttons["Retry"],
+                    app.buttons["Retry Transcription"],
+                    app.buttons["Start Transcription"]
+                ]
+                
+                for button in actionButtons {
+                    if button.exists {
+                        XCTAssertTrue(button.isHittable, "Action buttons should be accessible")
+                    }
+                }
+                
+                // Close detail view
+                doneButton.tap()
+            }
+        }
+    }}

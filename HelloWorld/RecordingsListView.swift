@@ -60,6 +60,7 @@ struct RecordingRowView: View {
     let recordingManager: RecordingManager
     @State private var isPlaying = false
     @State private var showingCopyConfirmation = false
+    @State private var showingTranscriptionDetail = false
     
     var body: some View {
         HStack {
@@ -118,6 +119,9 @@ struct RecordingRowView: View {
         } message: {
             Text("Transcription text has been copied to your clipboard.")
         }
+        .sheet(isPresented: $showingTranscriptionDetail) {
+            TranscriptionDetailView(recording: recording, recordingManager: recordingManager)
+        }
     }
     
     @ViewBuilder
@@ -150,11 +154,16 @@ struct RecordingRowView: View {
         
         case .completed:
             if recording.hasTranscription {
-                Text(recording.transcriptionPreview)
-                    .font(.caption)
-                    .foregroundColor(.primary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+                Button(action: {
+                    showingTranscriptionDetail = true
+                }) {
+                    Text(recording.transcriptionPreview)
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                .buttonStyle(PlainButtonStyle())
             } else {
                 Text("No transcription available")
                     .font(.caption)
@@ -163,14 +172,19 @@ struct RecordingRowView: View {
             }
         
         case .failed:
-            HStack(spacing: 4) {
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundColor(.red)
-                Text("Transcription failed - tap to retry")
-                    .font(.caption)
-                    .foregroundColor(.red)
+            Button(action: {
+                showingTranscriptionDetail = true
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                    Text("Transcription failed - tap to view details")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
             }
+            .buttonStyle(PlainButtonStyle())
         }
     }
     
@@ -199,17 +213,17 @@ struct RecordingRowView: View {
         case .completed:
             if recording.hasTranscription {
                 Button(action: {
-                    copyTranscriptionToClipboard()
+                    showingTranscriptionDetail = true
                 }) {
-                    Image(systemName: "doc.on.clipboard")
+                    Image(systemName: "text.bubble.fill")
                         .font(.title3)
                         .foregroundColor(.blue)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .accessibilityLabel("Copy transcription")
+                .accessibilityLabel("View transcription")
             } else {
                 Button(action: {
-                    recordingManager.retryTranscription(recording)
+                    showingTranscriptionDetail = true
                 }) {
                     Image(systemName: "arrow.clockwise")
                         .font(.title3)
