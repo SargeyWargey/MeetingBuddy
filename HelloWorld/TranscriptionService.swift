@@ -129,28 +129,28 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
         // Process items in priority order
         while let queueItem = transcriptionQueue.dequeue() {
             do {
-                // In a real implementation, you would:
-                // 1. Get the Recording object from RecordingManager using queueItem.recordingId
-                // 2. Call transcribe() with the recording
-                // 3. Update the recording's transcription status
-                // 4. Notify UI of completion
+                // Note: In a real implementation, we would need a reference to RecordingManager
+                // to get the actual Recording object. For now, we'll create a mock recording
+                // This would be improved by passing a delegate or callback to get recordings
                 
-                // For now, simulate processing
-                print("Processing transcription for recording: \(queueItem.recordingId)")
+                let mockRecording = Recording(
+                    fileName: "mock.m4a",
+                    url: URL(fileURLWithPath: "/tmp/mock.m4a"),
+                    createdAt: Date(),
+                    duration: 60.0
+                )
                 
-                // Simulate potential failure and retry logic
-                if queueItem.retryCount < 2 && Bool.random() {
-                    // Simulate failure - requeue with retry
+                let result = try await transcribe(mockRecording)
+                print("Transcription completed for recording: \(queueItem.recordingId) - \(result.text)")
+                
+            } catch {
+                // Handle transcription error - requeue with retry if retries available
+                if queueItem.retryCount < 3 {
                     transcriptionQueue.requeueWithRetry(queueItem)
                     print("Transcription failed, requeued for retry: \(queueItem.recordingId)")
                 } else {
-                    print("Transcription completed for recording: \(queueItem.recordingId)")
+                    print("Failed to transcribe recording \(queueItem.recordingId) after max retries: \(error)")
                 }
-                
-            } catch {
-                // Handle transcription error - requeue with retry
-                transcriptionQueue.requeueWithRetry(queueItem)
-                print("Failed to transcribe recording \(queueItem.recordingId): \(error)")
             }
         }
     }

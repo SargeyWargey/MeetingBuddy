@@ -72,9 +72,16 @@ struct RecordingView: View {
             .navigationTitle("Voice Recorder")
             .alert("Microphone Permission Denied", isPresented: $showingPermissionDenied) {
                 Button("Settings") {
+                    #if os(iOS)
                     if let settingsUrl = URL(string: UIApplication.openSettingsURLString) {
                         UIApplication.shared.open(settingsUrl)
                     }
+                    #else
+                    // On macOS, open System Preferences
+                    if let settingsUrl = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                        NSWorkspace.shared.open(settingsUrl)
+                    }
+                    #endif
                 }
                 Button("Cancel", role: .cancel) { }
             } message: {
