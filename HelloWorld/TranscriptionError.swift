@@ -50,7 +50,7 @@ enum TranscriptionError: LocalizedError, Equatable {
             return "Device Storage Full"
         case .microphoneUnavailable:
             return "Microphone Unavailable"
-        case .unknownError(let message):
+        case .unknownError(_):
             return "Transcription Failed"
         }
     }

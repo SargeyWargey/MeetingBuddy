@@ -139,6 +139,42 @@ class TranscriptionQueue: ObservableObject {
         }
     }
     
+    // MARK: - Additional Methods for Lifecycle Management
+    
+    /// Persists queue state (called on app termination)
+    func persist() {
+        saveQueue()
+    }
+    
+    /// Removes low priority items to free resources
+    func removeLowPriorityItems() {
+        let originalCount = items.count
+        items.removeAll { $0.priority == .low }
+        
+        if items.count != originalCount {
+            saveQueue()
+        }
+    }
+    
+    /// Checks if queue is empty
+    var isEmpty: Bool {
+        return items.isEmpty
+    }
+    
+    /// Queue statistics for monitoring
+    var statistics: QueueStatistics {
+        let priorityGroups = itemsByPriority
+        return QueueStatistics(
+            totalItems: items.count,
+            readyItems: readyCount,
+            retryingItems: items.count { $0.retryCount > 0 },
+            userRequestedItems: priorityGroups[.userRequested]?.count ?? 0,
+            highPriorityItems: priorityGroups[.high]?.count ?? 0,
+            normalPriorityItems: priorityGroups[.normal]?.count ?? 0,
+            lowPriorityItems: priorityGroups[.low]?.count ?? 0
+        )
+    }
+    
     // MARK: - Private Methods
     
     /// Sorts the queue by priority and creation time
@@ -172,11 +208,9 @@ class TranscriptionQueue: ObservableObject {
             items = []
         }
     }
-}
-
-// MARK: - Queue Statistics
-extension TranscriptionQueue {
-    /// Statistics about the current queue state
+    
+    // MARK: - Queue Statistics
+    
     struct QueueStatistics {
         let totalItems: Int
         let readyItems: Int
@@ -185,18 +219,5 @@ extension TranscriptionQueue {
         let highPriorityItems: Int
         let normalPriorityItems: Int
         let lowPriorityItems: Int
-    }
-    
-    /// Returns current queue statistics
-    var statistics: QueueStatistics {
-        return QueueStatistics(
-            totalItems: items.count,
-            readyItems: readyCount,
-            retryingItems: items.count { $0.retryCount > 0 },
-            userRequestedItems: items.count { $0.priority == .userRequested },
-            highPriorityItems: items.count { $0.priority == .high },
-            normalPriorityItems: items.count { $0.priority == .normal },
-            lowPriorityItems: items.count { $0.priority == .low }
-        )
     }
 }

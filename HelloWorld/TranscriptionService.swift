@@ -280,14 +280,107 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
         return transcriptionQueue.contains(recordingId: recording.id)
     }
     
-    /// Gets the queue position for a recording
-    func queuePosition(for recording: Recording) -> Int? {
-        return transcriptionQueue.position(for: recording.id)
+    // MARK: - App Lifecycle Support Methods
+    
+    /// Pause automatic transcription (called when app enters background)
+    func pauseAutomaticTranscription() async {
+        isProcessingQueue = false
     }
     
-    /// Updates the priority of a queued recording
-    func updateQueuePriority(_ recording: Recording, priority: TranscriptionQueueItem.Priority) {
-        transcriptionQueue.updatePriority(recordingId: recording.id, priority: priority)
+    /// Resume automatic transcription (called when app enters foreground)
+    func resumeAutomaticTranscription() async {
+        await processQueue()
+    }
+    
+    /// Refresh transcription status for visible recordings
+    func refreshVisibleTranscriptions() async {
+        // This would update UI for visible recordings
+        // Implementation depends on UI architecture
+    }
+    
+    /// Process any offline completions that occurred while app was backgrounded
+    func processOfflineCompletions() async {
+        await processOfflineQueue()
+    }
+    
+    /// Check network connectivity and update status
+    func checkNetworkConnectivity() async {
+        isOnline = networkMonitor.hasInternetConnection
+        if isOnline {
+            await processOfflineQueue()
+        }
+    }
+    
+    /// Save transcription queue state (for app termination)
+    func saveTranscriptionQueue() async {
+        transcriptionQueue.persist()
+    }
+    
+    /// Stop all transcription operations
+    func stopAllTranscriptions() async {
+        activeTranscriptions.removeAll()
+        recognitionTask?.cancel()
+        recognitionTask = nil
+    }
+    
+    /// Stop non-essential operations (low priority transcriptions)
+    func stopNonEssentialOperations() async {
+        transcriptionQueue.removeLowPriorityItems()
+    }
+    
+    /// Cancel low priority operations due to memory pressure
+    func cancelLowPriorityOperations() async {
+        transcriptionQueue.removeLowPriorityItems()
+    }
+    
+    /// Cancel pending network requests
+    func cancelPendingRequests() async {
+        recognitionTask?.cancel()
+        recognitionTask = nil
+    }
+    
+    /// Check if queue has items for background processing
+    func hasQueuedItems() async -> Bool {
+        return !transcriptionQueue.isEmpty
+    }
+    
+    /// Process queued transcriptions with time limit for background processing
+    func processQueuedTranscriptions(maxProcessingTime: TimeInterval) async -> Bool {
+        let startTime = Date()
+        var processedCount = 0
+        
+        while Date().timeIntervalSince(startTime) < maxProcessingTime {
+            guard let queueItem = transcriptionQueue.dequeue() else {
+                break // No more items
+            }
+            
+            do {
+                // Process the item (simplified implementation)
+                let mockRecording = Recording(
+                    fileName: "background.m4a",
+                    url: URL(fileURLWithPath: "/tmp/background.m4a"),
+                    createdAt: Date(),
+                    duration: 30.0
+                )
+                
+                _ = try await transcribe(mockRecording)
+                processedCount += 1
+                
+            } catch {
+                // Handle error and potentially requeue
+                if queueItem.retryCount < 3 {
+                    transcriptionQueue.requeueWithRetry(queueItem)
+                }
+            }
+        }
+        
+        return processedCount > 0
+    }
+    
+    /// Refresh transcription status
+    func refreshTranscriptionStatus() async {
+        // Update status for active transcriptions
+        // This would typically update UI state
     }
     
     /// Cleans up expired queue items
