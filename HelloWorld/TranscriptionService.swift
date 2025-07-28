@@ -10,7 +10,7 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     private let speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var transcriptionQueue: [Recording] = []
+    private let transcriptionQueue: TranscriptionQueue
     private var activeTranscriptions: Set<UUID> = []
     
     // MARK: - Published Properties
@@ -19,6 +19,7 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     // MARK: - Initialization
     init() {
         self.speechRecognizer = SFSpeechRecognizer()
+        self.transcriptionQueue = TranscriptionQueue()
     }
     
     // MARK: - TranscriptionServiceProtocol Implementation
@@ -81,23 +82,21 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     }
     
     func queueTranscription(_ recording: Recording) {
-        // Avoid duplicate entries
-        if !transcriptionQueue.contains(where: { $0.id == recording.id }) {
-            transcriptionQueue.append(recording)
-        }
+        transcriptionQueue.enqueue(recordingId: recording.id, priority: .normal)
     }
     
     func retryTranscription(_ recording: Recording) async throws -> TranscriptionResult {
         // Remove from queue if it exists
-        transcriptionQueue.removeAll { $0.id == recording.id }
+        transcriptionQueue.remove(recordingId: recording.id)
         
-        // Perform transcription
+        // Perform transcription with user-requested priority
+        transcriptionQueue.enqueue(recordingId: recording.id, priority: .userRequested)
         return try await transcribe(recording)
     }
     
     func cancelTranscription(_ recording: Recording) {
         // Remove from queue
-        transcriptionQueue.removeAll { $0.id == recording.id }
+        transcriptionQueue.remove(recordingId: recording.id)
         
         // Cancel active transcription if running
         if activeTranscriptions.contains(recording.id) {
@@ -122,28 +121,74 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     
     func processQueue() async {
         guard !isProcessingQueue else { return }
-        guard !transcriptionQueue.isEmpty else { return }
+        guard transcriptionQueue.count > 0 else { return }
         
         isProcessingQueue = true
         defer { isProcessingQueue = false }
         
-        // Process recordings in FIFO order
-        while !transcriptionQueue.isEmpty {
-            let recording = transcriptionQueue.removeFirst()
-            
+        // Process items in priority order
+        while let queueItem = transcriptionQueue.dequeue() {
             do {
-                _ = try await transcribe(recording)
-                // Note: In a real implementation, you would notify the RecordingManager
-                // or update the recording's transcription status here
+                // In a real implementation, you would:
+                // 1. Get the Recording object from RecordingManager using queueItem.recordingId
+                // 2. Call transcribe() with the recording
+                // 3. Update the recording's transcription status
+                // 4. Notify UI of completion
+                
+                // For now, simulate processing
+                print("Processing transcription for recording: \(queueItem.recordingId)")
+                
+                // Simulate potential failure and retry logic
+                if queueItem.retryCount < 2 && Bool.random() {
+                    // Simulate failure - requeue with retry
+                    transcriptionQueue.requeueWithRetry(queueItem)
+                    print("Transcription failed, requeued for retry: \(queueItem.recordingId)")
+                } else {
+                    print("Transcription completed for recording: \(queueItem.recordingId)")
+                }
+                
             } catch {
-                // Log error and continue with next item
-                print("Failed to transcribe recording \(recording.id): \(error)")
+                // Handle transcription error - requeue with retry
+                transcriptionQueue.requeueWithRetry(queueItem)
+                print("Failed to transcribe recording \(queueItem.recordingId): \(error)")
             }
         }
     }
     
     func clearQueue() {
-        transcriptionQueue.removeAll()
+        transcriptionQueue.clear()
+    }
+    
+    // MARK: - Queue Management Methods
+    
+    /// Adds a recording to the transcription queue with specified priority
+    func queueTranscription(_ recording: Recording, priority: TranscriptionQueueItem.Priority) {
+        transcriptionQueue.enqueue(recordingId: recording.id, priority: priority)
+    }
+    
+    /// Gets the current queue statistics
+    var queueStatistics: TranscriptionQueue.QueueStatistics {
+        return transcriptionQueue.statistics
+    }
+    
+    /// Checks if a recording is currently in the queue
+    func isInQueue(_ recording: Recording) -> Bool {
+        return transcriptionQueue.contains(recordingId: recording.id)
+    }
+    
+    /// Gets the queue position for a recording
+    func queuePosition(for recording: Recording) -> Int? {
+        return transcriptionQueue.position(for: recording.id)
+    }
+    
+    /// Updates the priority of a queued recording
+    func updateQueuePriority(_ recording: Recording, priority: TranscriptionQueueItem.Priority) {
+        transcriptionQueue.updatePriority(recordingId: recording.id, priority: priority)
+    }
+    
+    /// Cleans up expired queue items
+    func cleanupQueue() {
+        transcriptionQueue.cleanupExpiredItems()
     }
     
     // MARK: - Private Methods
