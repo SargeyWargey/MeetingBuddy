@@ -59,6 +59,7 @@ struct RecordingRowView: View {
     let recording: Recording
     let recordingManager: RecordingManager
     @State private var isPlaying = false
+    @State private var showingCopyConfirmation = false
     
     var body: some View {
         HStack {
@@ -98,10 +99,140 @@ struct RecordingRowView: View {
                 Text(recording.createdAt, style: .date)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                
+                // Transcription Section
+                transcriptionSection
             }
             
             Spacer()
+            
+            // Transcription Action Button
+            transcriptionActionButton
         }
         .padding(.vertical, 4)
+        .onLongPressGesture {
+            copyTranscriptionToClipboard()
+        }
+        .alert("Copied to Clipboard", isPresented: $showingCopyConfirmation) {
+            Button("OK") { }
+        } message: {
+            Text("Transcription text has been copied to your clipboard.")
+        }
+    }
+    
+    @ViewBuilder
+    private var transcriptionSection: some View {
+        switch recording.transcriptionStatus {
+        case .notStarted:
+            Text("Tap to transcribe")
+                .font(.caption)
+                .foregroundColor(.blue)
+                .italic()
+        
+        case .inProgress:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .scaleEffect(0.7)
+                Text("Transcribing...")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+            }
+        
+        case .queued:
+            HStack(spacing: 4) {
+                Image(systemName: "clock")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                Text("Queued for transcription")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+        
+        case .completed:
+            if recording.hasTranscription {
+                Text(recording.transcriptionPreview)
+                    .font(.caption)
+                    .foregroundColor(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            } else {
+                Text("No transcription available")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+        
+        case .failed:
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundColor(.red)
+                Text("Transcription failed - tap to retry")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var transcriptionActionButton: some View {
+        switch recording.transcriptionStatus {
+        case .notStarted, .failed:
+            Button(action: {
+                if recording.transcriptionStatus == .failed {
+                    recordingManager.retryTranscription(recording)
+                } else {
+                    recordingManager.transcribeRecording(recording)
+                }
+            }) {
+                Image(systemName: recording.transcriptionStatus == .failed ? "arrow.clockwise" : "text.bubble")
+                    .font(.title3)
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .accessibilityLabel(recording.transcriptionStatus == .failed ? "Retry transcription" : "Transcribe recording")
+        
+        case .inProgress, .queued:
+            ProgressView()
+                .scaleEffect(0.8)
+        
+        case .completed:
+            if recording.hasTranscription {
+                Button(action: {
+                    copyTranscriptionToClipboard()
+                }) {
+                    Image(systemName: "doc.on.clipboard")
+                        .font(.title3)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel("Copy transcription")
+            } else {
+                Button(action: {
+                    recordingManager.retryTranscription(recording)
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.title3)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .accessibilityLabel("Retry transcription")
+            }
+        }
+    }
+    
+    private func copyTranscriptionToClipboard() {
+        guard recording.hasTranscription, let transcription = recording.transcription else {
+            return
+        }
+        
+        #if os(iOS)
+        UIPasteboard.general.string = transcription
+        #elseif os(macOS)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(transcription, forType: .string)
+        #endif
+        
+        showingCopyConfirmation = true
     }
 }
