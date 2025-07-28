@@ -4,6 +4,8 @@ struct RecordingsListView: View {
     @StateObject private var recordingManager = RecordingManager()
     @State private var showingDeleteAlert = false
     @State private var recordingToDelete: Recording?
+    @State private var searchText = ""
+    @State private var isSearching = false
     
     var body: some View {
         NavigationView {
@@ -23,15 +25,34 @@ struct RecordingsListView: View {
                             .foregroundColor(.secondary)
                     }
                 } else {
-                    List {
-                        ForEach(recordingManager.recordings) { recording in
-                            RecordingRowView(recording: recording, recordingManager: recordingManager)
+                    VStack {
+                        if filteredRecordings.isEmpty && !searchText.isEmpty {
+                            searchEmptyStateView
+                        } else {
+                            List {
+                                ForEach(filteredRecordings) { recording in
+                                    RecordingRowView(
+                                        recording: recording, 
+                                        recordingManager: recordingManager,
+                                        searchText: searchText
+                                    )
+                                }
+                                .onDelete(perform: deleteRecordings)
+                            }
                         }
-                        .onDelete(perform: deleteRecordings)
                     }
                 }
             }
             .navigationTitle("Recordings")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    networkStatusIndicator
+                }
+            }
+            .searchable(text: $searchText, isPresented: $isSearching, prompt: "Search transcriptions...")
+            .onChange(of: searchText) { _ in
+                // Trigger UI update when search text changes
+            }
             .alert("Delete Recording", isPresented: $showingDeleteAlert) {
                 Button("Delete", role: .destructive) {
                     if let recording = recordingToDelete {
@@ -45,9 +66,82 @@ struct RecordingsListView: View {
         }
     }
     
+    // MARK: - Computed Properties
+    
+    @ViewBuilder
+    private var networkStatusIndicator: some View {
+        if let transcriptionService = recordingManager.transcriptionService {
+            HStack(spacing: 4) {
+                if !transcriptionService.isOnline {
+                    Image(systemName: "wifi.slash")
+                        .foregroundColor(.orange)
+                        .font(.caption)
+                    
+                    if transcriptionService.offlineQueueCount > 0 {
+                        Text("\(transcriptionService.offlineQueueCount)")
+                            .font(.caption2)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(Color.orange)
+                            .clipShape(Capsule())
+                    }
+                } else if transcriptionService.isProcessingQueue {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                }
+            }
+        }
+    }
+    
+    private var filteredRecordings: [Recording] {
+        if searchText.isEmpty {
+            return recordingManager.recordings
+        }
+        
+        return recordingManager.recordings.filter { recording in
+            // Only search through recordings that have transcriptions
+            guard recording.hasTranscription,
+                  let transcription = recording.transcription else {
+                return false
+            }
+            
+            return transcription.localizedCaseInsensitiveContains(searchText) ||
+                   recording.title.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+    
+    @ViewBuilder
+    private var searchEmptyStateView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 60))
+                .foregroundColor(.gray)
+            
+            Text("No Results Found")
+                .font(.title2)
+                .foregroundColor(.secondary)
+            
+            Text("No transcriptions contain \"\(searchText)\"")
+                .font(.body)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            if recordingManager.recordings.contains(where: { !$0.hasTranscription }) {
+                Text("Some recordings haven't been transcribed yet")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+        }
+        .padding()
+    }
+    
+    // MARK: - Methods
+    
     private func deleteRecordings(offsets: IndexSet) {
         for index in offsets {
-            let recording = recordingManager.recordings[index]
+            let recording = filteredRecordings[index]
             recordingToDelete = recording
             showingDeleteAlert = true
             break // Handle one at a time for confirmation
@@ -58,9 +152,16 @@ struct RecordingsListView: View {
 struct RecordingRowView: View {
     let recording: Recording
     let recordingManager: RecordingManager
+    let searchText: String
     @State private var isPlaying = false
     @State private var showingCopyConfirmation = false
     @State private var showingTranscriptionDetail = false
+    
+    init(recording: Recording, recordingManager: RecordingManager, searchText: String = "") {
+        self.recording = recording
+        self.recordingManager = recordingManager
+        self.searchText = searchText
+    }
     
     var body: some View {
         HStack {
@@ -144,12 +245,22 @@ struct RecordingRowView: View {
         
         case .queued:
             HStack(spacing: 4) {
-                Image(systemName: "clock")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                Text("Queued for transcription")
-                    .font(.caption)
-                    .foregroundColor(.orange)
+                if let transcriptionService = recordingManager.transcriptionService,
+                   transcriptionService.isQueuedForOffline(recording) {
+                    Image(systemName: "wifi.slash")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Text("Queued for when online")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                } else {
+                    Image(systemName: "clock")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                    Text("Queued for transcription")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
             }
         
         case .completed:
@@ -157,9 +268,8 @@ struct RecordingRowView: View {
                 Button(action: {
                     showingTranscriptionDetail = true
                 }) {
-                    Text(recording.transcriptionPreview)
+                    highlightedTranscriptionPreview
                         .font(.caption)
-                        .foregroundColor(.primary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                 }
@@ -233,6 +343,60 @@ struct RecordingRowView: View {
                 .accessibilityLabel("Retry transcription")
             }
         }
+    }
+    
+    // MARK: - Computed Properties
+    
+    @ViewBuilder
+    private var highlightedTranscriptionPreview: some View {
+        if searchText.isEmpty || !recording.hasTranscription {
+            Text(recording.transcriptionPreview)
+                .foregroundColor(.primary)
+        } else {
+            highlightedText(recording.transcriptionPreview, searchText: searchText)
+        }
+    }
+    
+    // MARK: - Helper Methods
+    
+    @ViewBuilder
+    private func highlightedText(_ text: String, searchText: String) -> some View {
+        let attributedString = createHighlightedAttributedString(text: text, searchText: searchText)
+        
+        #if os(iOS)
+        Text(AttributedString(attributedString))
+            .foregroundColor(.primary)
+        #elseif os(macOS)
+        Text(AttributedString(attributedString))
+            .foregroundColor(.primary)
+        #endif
+    }
+    
+    private func createHighlightedAttributedString(text: String, searchText: String) -> NSAttributedString {
+        let attributedString = NSMutableAttributedString(string: text)
+        let range = NSRange(location: 0, length: text.count)
+        
+        // Set default text color
+        #if os(iOS)
+        attributedString.addAttribute(.foregroundColor, value: UIColor.label, range: range)
+        #elseif os(macOS)
+        attributedString.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
+        #endif
+        
+        // Find and highlight search matches
+        let searchRange = text.range(of: searchText, options: [.caseInsensitive, .diacriticInsensitive])
+        if let searchRange = searchRange {
+            let nsRange = NSRange(searchRange, in: text)
+            #if os(iOS)
+            attributedString.addAttribute(.backgroundColor, value: UIColor.systemYellow, range: nsRange)
+            attributedString.addAttribute(.foregroundColor, value: UIColor.black, range: nsRange)
+            #elseif os(macOS)
+            attributedString.addAttribute(.backgroundColor, value: NSColor.systemYellow, range: nsRange)
+            attributedString.addAttribute(.foregroundColor, value: NSColor.black, range: nsRange)
+            #endif
+        }
+        
+        return attributedString
     }
     
     private func copyTranscriptionToClipboard() {

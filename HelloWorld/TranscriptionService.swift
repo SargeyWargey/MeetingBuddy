@@ -1,6 +1,7 @@
 import Foundation
 import Speech
 import AVFoundation
+import Combine
 
 /// Main transcription service that handles speech-to-text conversion
 @MainActor
@@ -12,20 +13,65 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     private var recognitionTask: SFSpeechRecognitionTask?
     private let transcriptionQueue: TranscriptionQueue
     private var activeTranscriptions: Set<UUID> = []
+    private let networkMonitor: NetworkMonitor
     
     // MARK: - Published Properties
     @Published private(set) var isProcessingQueue = false
+    @Published private(set) var isOnline = true
+    @Published private(set) var queuedForOffline: Set<UUID> = []
     
     // MARK: - Initialization
     init() {
         self.speechRecognizer = SFSpeechRecognizer()
         self.transcriptionQueue = TranscriptionQueue()
+        self.networkMonitor = NetworkMonitor()
+        
+        // Set initial online status
+        self.isOnline = networkMonitor.hasInternetConnection
+        
+        // Monitor network changes
+        setupNetworkMonitoring()
+    }
+    
+    // MARK: - Network Monitoring Setup
+    private func setupNetworkMonitoring() {
+        // Observe network status changes
+        Task {
+            for await _ in NotificationCenter.default.notifications(named: .networkStatusChanged) {
+                await handleNetworkStatusChange()
+            }
+        }
+        
+        // Monitor network monitor's published properties
+        networkMonitor.$isConnected
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isConnected in
+                self?.isOnline = isConnected
+                if isConnected {
+                    Task {
+                        await self?.processOfflineQueue()
+                    }
+                }
+            }
+            .store(in: &cancellables)
+    }
+    
+    private var cancellables = Set<AnyCancellable>()
+    
+    private func handleNetworkStatusChange() async {
+        let wasOnline = isOnline
+        isOnline = networkMonitor.hasInternetConnection
+        
+        // If we just came back online, process the offline queue
+        if !wasOnline && isOnline {
+            await processOfflineQueue()
+        }
     }
     
     // MARK: - TranscriptionServiceProtocol Implementation
     
     var isAvailable: Bool {
-        return isOnDeviceAvailable || isCloudAvailable
+        return isOnDeviceAvailable || (isCloudAvailable && isOnline)
     }
     
     var isOnDeviceAvailable: Bool {
@@ -35,7 +81,7 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     
     var isCloudAvailable: Bool {
         guard let recognizer = speechRecognizer else { return false }
-        return recognizer.isAvailable
+        return recognizer.isAvailable && networkMonitor.isSuitableForCloudTranscription
     }
     
     var queueCount: Int {
@@ -43,10 +89,6 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     }
     
     func transcribe(_ recording: Recording) async throws -> TranscriptionResult {
-        guard isAvailable else {
-            throw TranscriptionError.serviceUnavailable
-        }
-        
         guard hasPermissions() else {
             throw TranscriptionError.permissionDenied
         }
@@ -56,14 +98,32 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
             throw TranscriptionError.unknownError("Transcription already in progress for this recording")
         }
         
+        // Handle offline scenarios
+        if !isOnline && !isOnDeviceAvailable {
+            // Queue for offline processing
+            queuedForOffline.insert(recording.id)
+            queueTranscription(recording, priority: .normal)
+            throw TranscriptionError.networkUnavailable
+        }
+        
+        // If online but cloud not suitable (expensive connection), prefer on-device
+        let preferOnDevice = !networkMonitor.isSuitableForCloudTranscription
+        
+        guard isOnDeviceAvailable || (isOnline && isCloudAvailable) else {
+            throw TranscriptionError.serviceUnavailable
+        }
+        
         activeTranscriptions.insert(recording.id)
         defer { activeTranscriptions.remove(recording.id) }
         
         let startTime = Date()
         
         do {
-            let result = try await performTranscription(for: recording)
+            let result = try await performTranscription(for: recording, preferOnDevice: preferOnDevice)
             let processingTime = Date().timeIntervalSince(startTime)
+            
+            // Remove from offline queue if it was there
+            queuedForOffline.remove(recording.id)
             
             return TranscriptionResult(
                 text: result.text,
@@ -73,6 +133,12 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
                 completedAt: Date()
             )
         } catch {
+            // If network error and on-device not available, queue for offline
+            if case TranscriptionError.networkUnavailable = error, !isOnDeviceAvailable {
+                queuedForOffline.insert(recording.id)
+                queueTranscription(recording, priority: .normal)
+            }
+            
             if let transcriptionError = error as? TranscriptionError {
                 throw transcriptionError
             } else {
@@ -82,7 +148,13 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     }
     
     func queueTranscription(_ recording: Recording) {
-        transcriptionQueue.enqueue(recordingId: recording.id, priority: .normal)
+        let priority: TranscriptionQueueItem.Priority = isOnline ? .normal : .low
+        transcriptionQueue.enqueue(recordingId: recording.id, priority: priority)
+        
+        // If offline, add to offline queue
+        if !isOnline {
+            queuedForOffline.insert(recording.id)
+        }
     }
     
     func retryTranscription(_ recording: Recording) async throws -> TranscriptionResult {
@@ -157,6 +229,38 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     
     func clearQueue() {
         transcriptionQueue.clear()
+        queuedForOffline.removeAll()
+    }
+    
+    // MARK: - Offline Queue Processing
+    
+    /// Processes items that were queued while offline
+    private func processOfflineQueue() async {
+        guard isOnline else { return }
+        guard !queuedForOffline.isEmpty else { return }
+        
+        print("Processing offline queue with \(queuedForOffline.count) items")
+        
+        // Create a copy to iterate over
+        let offlineItems = Array(queuedForOffline)
+        
+        for recordingId in offlineItems {
+            // Update priority to normal since we're back online
+            transcriptionQueue.updatePriority(recordingId: recordingId, priority: .normal)
+        }
+        
+        // Process the queue
+        await processQueue()
+    }
+    
+    /// Gets the count of items queued for offline processing
+    var offlineQueueCount: Int {
+        return queuedForOffline.count
+    }
+    
+    /// Checks if a recording is queued for offline processing
+    func isQueuedForOffline(_ recording: Recording) -> Bool {
+        return queuedForOffline.contains(recording.id)
     }
     
     // MARK: - Queue Management Methods
@@ -193,22 +297,97 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
     
     // MARK: - Private Methods
     
-    private func performTranscription(for recording: Recording) async throws -> (text: String, confidence: Float, method: TranscriptionMethod) {
-        // This is a placeholder implementation
-        // In the actual implementation, this would:
-        // 1. Load the audio file from recording.fileURL
-        // 2. Use SFSpeechRecognizer to transcribe the audio
-        // 3. Handle on-device vs cloud transcription
-        // 4. Return the transcription result
+    private func performTranscription(for recording: Recording, preferOnDevice: Bool = false) async throws -> (text: String, confidence: Float, method: TranscriptionMethod) {
+        guard let speechRecognizer = speechRecognizer else {
+            throw TranscriptionError.serviceUnavailable
+        }
         
-        // For now, return a mock result to satisfy the interface
-        return (
-            text: "Mock transcription for recording: \(recording.title)",
-            confidence: 0.95,
-            method: isOnDeviceAvailable ? .onDevice : .cloud
-        )
+        // Determine transcription method based on availability and preference
+        let useOnDevice = isOnDeviceAvailable && (preferOnDevice || !isOnline)
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = SFSpeechURLRecognitionRequest(url: recording.url)
+            
+            // Configure request based on method
+            if useOnDevice {
+                request.requiresOnDeviceRecognition = true
+            }
+            
+            // Set up recognition task
+            recognitionTask = speechRecognizer.recognitionTask(with: request) { result, error in
+                if let error = error {
+                    let transcriptionError = self.convertSpeechError(error)
+                    continuation.resume(throwing: transcriptionError)
+                    return
+                }
+                
+                guard let result = result else {
+                    continuation.resume(throwing: TranscriptionError.unknownError("No transcription result received"))
+                    return
+                }
+                
+                // Return final result when transcription is complete
+                if result.isFinal {
+                    let transcription = result.bestTranscription.formattedString
+                    let confidence = result.bestTranscription.segments.isEmpty ? 0.0 : 
+                        result.bestTranscription.segments.map { $0.confidence }.reduce(0, +) / Float(result.bestTranscription.segments.count)
+                    
+                    let method: TranscriptionMethod = useOnDevice ? .onDevice : .cloud
+                    
+                    continuation.resume(returning: (
+                        text: transcription,
+                        confidence: confidence,
+                        method: method
+                    ))
+                }
+            }
+        }
+    }
+    
+    /// Converts SFSpeechRecognizer errors to TranscriptionError
+    private func convertSpeechError(_ error: Error) -> TranscriptionError {
+        // Handle NSError cases
+        if let nsError = error as NSError? {
+            // Check for Speech framework errors
+            if nsError.domain == "kSFSpeechErrorDomain" {
+                switch nsError.code {
+                case 1:  // SFSpeechErrorCodeRequestDenied
+                    return .permissionDenied
+                case 2:  // SFSpeechErrorCodeRequestNotAuthorized
+                    return .permissionDenied
+                case 3:  // SFSpeechErrorCodeRequestUnsupported
+                    return .serviceUnavailable
+                case 4:  // SFSpeechErrorCodeRequestTimedOut
+                    return .processingTimeout
+                case 5:  // SFSpeechErrorCodeRequestCancelled
+                    return .unknownError("Transcription was cancelled")
+                case 6:  // SFSpeechErrorCodeRequestFailed
+                    return .serviceUnavailable
+                case 7:  // SFSpeechErrorCodeRequestNetworkUnavailable
+                    return .networkUnavailable
+                case 8:  // SFSpeechErrorCodeRequestQuotaExceeded
+                    return .quotaExceeded
+                default:
+                    return .unknownError("Speech recognition error: \(nsError.localizedDescription)")
+                }
+            }
+            
+            // Handle other error domains
+            switch nsError.domain {
+            case NSURLErrorDomain:
+                return .networkUnavailable
+            case "AVAudioSessionErrorDomain":
+                return .audioFormatUnsupported
+            default:
+                return .unknownError("Unknown error: \(error.localizedDescription)")
+            }
+        }
+        
+        return .unknownError("Unexpected error: \(error.localizedDescription)")
     }
 }
+
+
 
 // MARK: - Private Result Structure
 private struct TranscriptionInternalResult {
