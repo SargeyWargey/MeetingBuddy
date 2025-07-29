@@ -15,6 +15,10 @@ class RecordingManager: NSObject, ObservableObject {
     @Published var transcriptionPermissionGranted = false
     @Published var errorHandler: TranscriptionErrorHandler!
     
+    // AI Summarization
+    @Published var summaryManager: SummaryManager?
+    private var networkMonitor: NetworkMonitor?
+    
     // Performance optimization components
     private var performanceMonitor: TranscriptionPerformanceMonitor?
     private var transcriptionCache: TranscriptionCache?
@@ -39,6 +43,7 @@ class RecordingManager: NSObject, ObservableObject {
             self.setupTranscriptionService()
             self.setupErrorHandlerNotifications()
             self.initializePerformanceComponents()
+            self.initializeSummaryManager()
         }
         
         loadRecordings()
@@ -60,6 +65,20 @@ class RecordingManager: NSObject, ObservableObject {
         }
         
         print("Performance optimization components initialized in RecordingManager")
+    }
+    
+    @MainActor
+    private func initializeSummaryManager() {
+        // Initialize network monitor
+        self.networkMonitor = NetworkMonitor()
+        
+        // Initialize summary manager
+        if let networkMonitor = self.networkMonitor {
+            self.summaryManager = SummaryManager(networkMonitor: networkMonitor)
+            print("AI Summarization components initialized in RecordingManager")
+        } else {
+            print("Failed to initialize network monitor for AI summarization")
+        }
     }
     
     /// Configure performance optimization components (called from ContentView)
@@ -519,6 +538,111 @@ class RecordingManager: NSObject, ObservableObject {
     /// Gets the current recording by ID (helper for transcription service)
     func getRecording(by id: UUID) -> Recording? {
         return recordings.first { $0.id == id }
+    }
+    
+    // MARK: - Summary Management Methods
+    
+    /// Generates a summary for a recording
+    func generateSummary(for recording: Recording, type: SummaryType? = nil, length: SummaryLength? = nil, forceRegenerate: Bool = false) {
+        guard let summaryManager = summaryManager else {
+            print("Summary manager not available")
+            return
+        }
+        
+        // Update recording status to in progress
+        updateRecordingSummaryStatus(recording.id, status: .inProgress)
+        
+        Task {
+            do {
+                let summary = try await summaryManager.generateSummary(
+                    for: recording,
+                    type: type,
+                    length: length,
+                    forceRegenerate: forceRegenerate
+                )
+                
+                await MainActor.run {
+                    self.handleSummarySuccess(recordingId: recording.id, summary: summary)
+                }
+            } catch {
+                await MainActor.run {
+                    self.handleSummaryError(recordingId: recording.id, error: error)
+                }
+            }
+        }
+    }
+    
+    /// Deletes a summary for a recording
+    @MainActor
+    func deleteSummary(for recording: Recording) {
+        summaryManager?.deleteSummary(for: recording.id)
+        updateRecordingSummaryStatus(recording.id, status: .notStarted)
+        
+        // Clear summary data from recording
+        if let index = recordings.firstIndex(where: { $0.id == recording.id }) {
+            recordings[index].summary = nil
+            recordings[index].summaryError = nil
+            recordings[index].lastSummaryAttempt = nil
+            saveRecordings()
+        }
+    }
+    
+    /// Gets a summary for a recording
+    @MainActor
+    func getSummary(for recording: Recording, type: SummaryType? = nil, length: SummaryLength? = nil) -> Summary? {
+        return summaryManager?.getSummary(for: recording.id, type: type, length: length)
+    }
+    
+    // MARK: - Private Summary Helper Methods
+    
+    @MainActor
+    private func handleSummarySuccess(recordingId: UUID, summary: Summary) {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingId }) else {
+            return
+        }
+        
+        recordings[index].summary = summary
+        recordings[index].summaryStatus = .completed
+        recordings[index].summaryError = nil
+        recordings[index].lastSummaryAttempt = Date()
+        
+        // Provide accessibility feedback
+        HapticFeedbackManager.shared.transcriptionCompleted()
+        AccessibilityAnnouncementManager.shared.announce("Summary generated successfully")
+        
+        saveRecordings()
+    }
+    
+    @MainActor
+    private func handleSummaryError(recordingId: UUID, error: Error) {
+        guard let index = recordings.firstIndex(where: { $0.id == recordingId }) else {
+            return
+        }
+        
+        recordings[index].summaryStatus = .failed
+        recordings[index].summaryError = error.localizedDescription
+        recordings[index].lastSummaryAttempt = Date()
+        
+        // Provide accessibility feedback
+        HapticFeedbackManager.shared.transcriptionFailed()
+        AccessibilityAnnouncementManager.shared.announce("Summary generation failed")
+        
+        saveRecordings()
+    }
+    
+    private func updateRecordingSummaryStatus(_ recordingId: UUID, status: SummaryStatus) {
+        DispatchQueue.main.async {
+            guard let index = self.recordings.firstIndex(where: { $0.id == recordingId }) else {
+                return
+            }
+            
+            self.recordings[index].summaryStatus = status
+            if status == .inProgress {
+                self.recordings[index].summaryError = nil
+            }
+            
+            self.saveRecordings()
+        }
     }
     
     /// Updates a recording's transcription data

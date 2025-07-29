@@ -20,6 +20,12 @@ struct TranscriptionDetailView: View {
                     // Transcription Content
                     transcriptionContentSection
                     
+                    // AI Summary Section (only show if transcription exists and summary manager is available)
+                    if recording.hasTranscription, let summaryManager = recordingManager.summaryManager {
+                        Divider()
+                        SummaryView(recording: recording, summaryManager: summaryManager)
+                    }
+                    
                     // Metadata Section (only show if transcription exists)
                     if recording.hasTranscription {
                         Divider()

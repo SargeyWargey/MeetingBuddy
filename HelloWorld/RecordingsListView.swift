@@ -49,7 +49,7 @@ struct RecordingsListView: View {
                     networkStatusIndicator
                 }
             }
-            .searchable(text: $searchText, isPresented: $isSearching, prompt: "Search transcriptions...")
+            .searchable(text: $searchText, isPresented: $isSearching, prompt: "Search transcriptions and summaries...")
             .onChange(of: searchText) {
                 // Trigger UI update when search text changes
                 // Announce search results for accessibility
@@ -132,14 +132,26 @@ struct RecordingsListView: View {
         }
         
         return recordingManager.recordings.filter { recording in
-            // Only search through recordings that have transcriptions
-            guard recording.hasTranscription,
-                  let transcription = recording.transcription else {
-                return false
+            // Search through title first
+            if recording.title.localizedCaseInsensitiveContains(searchText) {
+                return true
             }
             
-            return transcription.localizedCaseInsensitiveContains(searchText) ||
-                   recording.title.localizedCaseInsensitiveContains(searchText)
+            // Search through transcription if available
+            if recording.hasTranscription,
+               let transcription = recording.transcription,
+               transcription.localizedCaseInsensitiveContains(searchText) {
+                return true
+            }
+            
+            // Search through summary if available
+            if recording.hasSummary,
+               let summary = recording.summary,
+               summary.text.localizedCaseInsensitiveContains(searchText) {
+                return true
+            }
+            
+            return false
         }
     }
     
@@ -154,13 +166,20 @@ struct RecordingsListView: View {
                 .font(.title2)
                 .foregroundColor(.secondary)
             
-            Text("No transcriptions contain \"\(searchText)\"")
+            Text("No transcriptions or summaries contain \"\(searchText)\"")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             
             if recordingManager.recordings.contains(where: { !$0.hasTranscription }) {
                 Text("Some recordings haven't been transcribed yet")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+            
+            if recordingManager.recordings.contains(where: { $0.hasTranscription && !$0.hasSummary }) {
+                Text("Some transcriptions haven't been summarized yet")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .italic()
@@ -242,12 +261,25 @@ struct RecordingRowView: View {
                 
                 // Transcription Section
                 transcriptionSection
+                
+                // Summary Section (only show if transcription exists and summary manager is available)
+                if recording.hasTranscription, let summaryManager = recordingManager.summaryManager {
+                    summarySection(summaryManager: summaryManager)
+                }
             }
             
             Spacer()
             
-            // Transcription Action Button
-            transcriptionActionButton
+            // Action Buttons
+            VStack(spacing: 8) {
+                // Transcription Action Button
+                transcriptionActionButton
+                
+                // Summary Action Button (only show if transcription exists and summary manager is available)
+                if recording.hasTranscription, let summaryManager = recordingManager.summaryManager {
+                    summaryActionButton(summaryManager: summaryManager)
+                }
+            }
         }
         .padding(.vertical, 4)
         .onLongPressGesture {
@@ -415,6 +447,148 @@ struct RecordingRowView: View {
         }
     }
     
+    // MARK: - Summary Section
+    
+    @ViewBuilder
+    private func summarySection(summaryManager: SummaryManager) -> some View {
+        switch recording.summaryStatus {
+        case .notStarted:
+            if recording.canSummarize {
+                Text("Tap to generate AI summary")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                    .italic()
+            } else {
+                Text("Transcription too short for summary")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+        
+        case .inProgress:
+            HStack(spacing: 4) {
+                ProgressView()
+                    .scaleEffect(0.7)
+                Text("Generating summary...")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                    .transcriptionDynamicType()
+            }
+            .transcriptionStatusAccessibility(status: recording.transcriptionStatus)
+        
+        case .queued:
+            HStack(spacing: 4) {
+                Image(systemName: "clock.badge")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                Text("Queued for summary")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .transcriptionDynamicType()
+            }
+            .transcriptionStatusAccessibility(status: recording.transcriptionStatus)
+        
+        case .completed:
+            if recording.hasSummary {
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
+                    showingTranscriptionDetail = true
+                }) {
+                    highlightedSummaryPreview(summaryText: recording.summaryPreview)
+                        .font(.caption)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .transcriptionDynamicType()
+                }
+                .buttonStyle(PlainButtonStyle())
+                .transcriptionActionAccessibility(action: .view)
+            } else {
+                Text("No summary available")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .italic()
+            }
+        
+        case .failed:
+            Button(action: {
+                showingTranscriptionDetail = true
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                    Text("Summary failed - tap to retry")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+        }
+    }
+    
+    @ViewBuilder
+    private func summaryActionButton(summaryManager: SummaryManager) -> some View {
+        switch recording.summaryStatus {
+        case .notStarted:
+            if recording.canSummarize {
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
+                    generateSummary(summaryManager: summaryManager)
+                }) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .transcriptionAccessibility(
+                    label: "Generate summary",
+                    hint: "Generate AI summary of transcription"
+                )
+            }
+        
+        case .failed:
+            Button(action: {
+                HapticFeedbackManager.shared.buttonPressed()
+                generateSummary(summaryManager: summaryManager, forceRegenerate: true)
+            }) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+                    .foregroundColor(.blue)
+            }
+            .buttonStyle(PlainButtonStyle())
+            .transcriptionActionAccessibility(action: .retry)
+        
+        case .inProgress, .queued:
+            ProgressView()
+                .scaleEffect(0.6)
+        
+        case .completed:
+            if recording.hasSummary {
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
+                    showingTranscriptionDetail = true
+                }) {
+                    Image(systemName: "brain.head.profile.fill")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .transcriptionActionAccessibility(action: .view)
+            } else {
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
+                    generateSummary(summaryManager: summaryManager, forceRegenerate: true)
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .transcriptionActionAccessibility(action: .retry)
+            }
+        }
+    }
+    
     // MARK: - Computed Properties
     
     @ViewBuilder
@@ -424,6 +598,16 @@ struct RecordingRowView: View {
                 .foregroundColor(.primary)
         } else {
             highlightedText(recording.transcriptionPreview, searchText: searchText)
+        }
+    }
+    
+    @ViewBuilder
+    private func highlightedSummaryPreview(summaryText: String) -> some View {
+        if searchText.isEmpty {
+            Text(summaryText)
+                .foregroundColor(.primary)
+        } else {
+            highlightedText(summaryText, searchText: searchText)
         }
     }
     
@@ -484,5 +668,19 @@ struct RecordingRowView: View {
         HapticFeedbackManager.shared.textCopied()
         AccessibilityAnnouncementManager.shared.announceTextCopied()
         showingCopyConfirmation = true
+    }
+    
+    private func generateSummary(summaryManager: SummaryManager, forceRegenerate: Bool = false) {
+        Task {
+            do {
+                let _ = try await summaryManager.generateSummary(
+                    for: recording,
+                    forceRegenerate: forceRegenerate
+                )
+            } catch {
+                // Error handling - could show an alert or update UI state
+                print("Failed to generate summary: \(error)")
+            }
+        }
     }
 }
