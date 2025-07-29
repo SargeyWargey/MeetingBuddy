@@ -463,6 +463,10 @@ class RecordingManager: NSObject, ObservableObject {
         // Notify error handler of success to clear error state
         errorHandler.handleSuccess(for: recordingId)
         
+        // Provide accessibility feedback
+        HapticFeedbackManager.shared.transcriptionCompleted()
+        AccessibilityAnnouncementManager.shared.announceTranscriptionCompleted(for: recordings[index])
+        
         saveRecordings()
     }
     
@@ -487,6 +491,10 @@ class RecordingManager: NSObject, ObservableObject {
         // Use the error handler for comprehensive error management
         errorHandler.handleError(transcriptionError, for: recordingId, context: "Transcription failed")
         
+        // Provide accessibility feedback
+        HapticFeedbackManager.shared.transcriptionFailed()
+        AccessibilityAnnouncementManager.shared.announceTranscriptionFailed(for: recordings[index])
+        
         saveRecordings()
     }
     
@@ -499,6 +507,9 @@ class RecordingManager: NSObject, ObservableObject {
             self.recordings[index].transcriptionStatus = status
             if status == .inProgress {
                 self.recordings[index].transcriptionError = nil
+                // Provide accessibility feedback for transcription start
+                HapticFeedbackManager.shared.transcriptionStarted()
+                AccessibilityAnnouncementManager.shared.announceTranscriptionStarted(for: self.recordings[index])
             }
             
             self.saveRecordings()

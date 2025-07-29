@@ -45,7 +45,7 @@ struct TranscriptionDetailView: View {
                         Button(action: copyTranscriptionToClipboard) {
                             Image(systemName: "doc.on.clipboard")
                         }
-                        .accessibilityLabel("Copy transcription")
+                        .transcriptionActionAccessibility(action: .copy)
                     }
                 }
                 #else
@@ -60,7 +60,7 @@ struct TranscriptionDetailView: View {
                         Button(action: copyTranscriptionToClipboard) {
                             Image(systemName: "doc.on.clipboard")
                         }
-                        .accessibilityLabel("Copy transcription")
+                        .transcriptionActionAccessibility(action: .copy)
                     }
                 }
                 #endif
@@ -173,26 +173,43 @@ struct TranscriptionDetailView: View {
     @ViewBuilder
     private var transcriptionTextView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(recording.transcription ?? "")
-                .font(.body)
-                .textSelection(.enabled)
-                .padding()
-                .background(Color(red: 0.95, green: 0.95, blue: 0.97))
-                .cornerRadius(8)
+            DynamicTypeReader { dynamicTypeSize in
+                AnyView(
+                    Text(recording.transcription ?? "")
+                        .font(.system(size: dynamicTypeSize.transcriptionFontSize))
+                        .textSelection(.enabled)
+                        .padding()
+                        .background(Color(red: 0.95, green: 0.95, blue: 0.97))
+                        .cornerRadius(8)
+                        .transcriptionAccessibility(
+                            label: "Transcription text",
+                            hint: "Double tap to select text for copying",
+                            value: recording.transcription ?? ""
+                        )
+                )
+            }
             
             HStack {
-                Button(action: copyTranscriptionToClipboard) {
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
+                    copyTranscriptionToClipboard()
+                }) {
                     Label("Copy Text", systemImage: "doc.on.clipboard")
                 }
                 .buttonStyle(.bordered)
+                .transcriptionActionAccessibility(action: .copy)
                 
                 Spacer()
                 
-                Button(action: retryTranscription) {
+                Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
+                    retryTranscription()
+                }) {
                     Label("Retry", systemImage: "arrow.clockwise")
                 }
                 .buttonStyle(.bordered)
                 .disabled(isRetrying)
+                .transcriptionActionAccessibility(action: .retry, isEnabled: !isRetrying)
             }
         }
     }
@@ -213,11 +230,15 @@ struct TranscriptionDetailView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             
-            Button(action: retryTranscription) {
+            Button(action: {
+                HapticFeedbackManager.shared.buttonPressed()
+                retryTranscription()
+            }) {
                 Label("Retry Transcription", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.borderedProminent)
             .disabled(isRetrying)
+            .transcriptionActionAccessibility(action: .retry, isEnabled: !isRetrying)
         }
         .padding()
     }
@@ -314,11 +335,15 @@ struct TranscriptionDetailView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             
-            Button(action: retryTranscription) {
+            Button(action: {
+                HapticFeedbackManager.shared.buttonPressed()
+                retryTranscription()
+            }) {
                 Label("Process Now", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
             .disabled(isRetrying)
+            .transcriptionActionAccessibility(action: .transcribe, isEnabled: !isRetrying)
         }
         .padding()
     }
@@ -339,7 +364,10 @@ struct TranscriptionDetailView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
             
-            Button(action: startTranscription) {
+            Button(action: {
+                HapticFeedbackManager.shared.buttonPressed()
+                startTranscription()
+            }) {
                 if isRetrying {
                     HStack {
                         ProgressView()
@@ -352,6 +380,7 @@ struct TranscriptionDetailView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(isRetrying)
+            .transcriptionActionAccessibility(action: .transcribe, isEnabled: !isRetrying)
         }
         .padding()
     }
@@ -421,6 +450,8 @@ struct TranscriptionDetailView: View {
         NSPasteboard.general.setString(transcription, forType: .string)
         #endif
         
+        HapticFeedbackManager.shared.textCopied()
+        AccessibilityAnnouncementManager.shared.announceTextCopied()
         showingCopyConfirmation = true
     }
     

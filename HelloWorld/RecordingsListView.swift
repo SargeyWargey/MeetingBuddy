@@ -52,6 +52,12 @@ struct RecordingsListView: View {
             .searchable(text: $searchText, isPresented: $isSearching, prompt: "Search transcriptions...")
             .onChange(of: searchText) {
                 // Trigger UI update when search text changes
+                // Announce search results for accessibility
+                if !searchText.isEmpty {
+                    let resultCount = filteredRecordings.count
+                    let message = resultCount == 0 ? "No search results found" : "\(resultCount) search result\(resultCount == 1 ? "" : "s") found"
+                    AccessibilityAnnouncementManager.shared.announce(message)
+                }
             }
             .alert("Delete Recording", isPresented: $showingDeleteAlert) {
                 Button("Delete", role: .destructive) {
@@ -90,6 +96,10 @@ struct RecordingsListView: View {
                     Image(systemName: "wifi.slash")
                         .foregroundColor(.orange)
                         .font(.caption)
+                        .transcriptionAccessibility(
+                            label: "Offline",
+                            hint: "Device is offline, transcriptions will be queued"
+                        )
                     
                     if transcriptionService.offlineQueueCount > 0 {
                         Text("\(transcriptionService.offlineQueueCount)")
@@ -99,10 +109,18 @@ struct RecordingsListView: View {
                             .padding(.vertical, 2)
                             .background(Color.orange)
                             .clipShape(Capsule())
+                            .transcriptionAccessibility(
+                                label: "\(transcriptionService.offlineQueueCount) queued",
+                                hint: "Number of transcriptions waiting for network connection"
+                            )
                     }
                 } else if transcriptionService.isProcessingQueue {
                     ProgressView()
                         .scaleEffect(0.7)
+                        .transcriptionAccessibility(
+                            label: "Processing queue",
+                            hint: "Transcriptions are being processed"
+                        )
                 }
             }
         }
@@ -181,6 +199,7 @@ struct RecordingRowView: View {
         HStack {
             // Play/Pause Button
             Button(action: {
+                HapticFeedbackManager.shared.buttonPressed()
                 if isPlaying {
                     recordingManager.stopPlayback()
                     isPlaying = false
@@ -194,11 +213,16 @@ struct RecordingRowView: View {
                     .foregroundColor(.blue)
             }
             .buttonStyle(PlainButtonStyle())
+            .transcriptionAccessibility(
+                label: isPlaying ? "Pause recording" : "Play recording",
+                hint: "Plays or pauses the audio recording"
+            )
             
             VStack(alignment: .leading, spacing: 4) {
                 Text(recording.title)
                     .font(.headline)
                     .lineLimit(1)
+                    .transcriptionDynamicType()
                 
                 HStack {
                     Text(recording.durationString)
@@ -229,6 +253,9 @@ struct RecordingRowView: View {
         .onLongPressGesture {
             copyTranscriptionToClipboard()
         }
+        .accessibilityAction(named: "Copy transcription") {
+            copyTranscriptionToClipboard()
+        }
         .alert("Copied to Clipboard", isPresented: $showingCopyConfirmation) {
             Button("OK") { }
         } message: {
@@ -255,7 +282,9 @@ struct RecordingRowView: View {
                 Text("Transcribing...")
                     .font(.caption)
                     .foregroundColor(.blue)
+                    .transcriptionDynamicType()
             }
+            .transcriptionStatusAccessibility(status: recording.transcriptionStatus)
         
         case .queued:
             HStack(spacing: 4) {
@@ -267,6 +296,7 @@ struct RecordingRowView: View {
                     Text("Queued for when online")
                         .font(.caption)
                         .foregroundColor(.orange)
+                        .transcriptionDynamicType()
                 } else {
                     Image(systemName: "clock")
                         .font(.caption)
@@ -274,20 +304,25 @@ struct RecordingRowView: View {
                     Text("Queued for transcription")
                         .font(.caption)
                         .foregroundColor(.orange)
+                        .transcriptionDynamicType()
                 }
             }
+            .transcriptionStatusAccessibility(status: recording.transcriptionStatus)
         
         case .completed:
             if recording.hasTranscription {
                 Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
                     showingTranscriptionDetail = true
                 }) {
                     highlightedTranscriptionPreview
                         .font(.caption)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
+                        .transcriptionDynamicType()
                 }
                 .buttonStyle(PlainButtonStyle())
+                .transcriptionActionAccessibility(action: .view)
             } else {
                 Text("No transcription available")
                     .font(.caption)
@@ -333,6 +368,7 @@ struct RecordingRowView: View {
         switch recording.transcriptionStatus {
         case .notStarted, .failed:
             Button(action: {
+                HapticFeedbackManager.shared.buttonPressed()
                 if recording.transcriptionStatus == .failed {
                     recordingManager.retryTranscription(recording)
                 } else {
@@ -344,7 +380,9 @@ struct RecordingRowView: View {
                     .foregroundColor(.blue)
             }
             .buttonStyle(PlainButtonStyle())
-            .accessibilityLabel(recording.transcriptionStatus == .failed ? "Retry transcription" : "Transcribe recording")
+            .transcriptionActionAccessibility(
+                action: recording.transcriptionStatus == .failed ? .retry : .transcribe
+            )
         
         case .inProgress, .queued:
             ProgressView()
@@ -353,6 +391,7 @@ struct RecordingRowView: View {
         case .completed:
             if recording.hasTranscription {
                 Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
                     showingTranscriptionDetail = true
                 }) {
                     Image(systemName: "text.bubble.fill")
@@ -360,9 +399,10 @@ struct RecordingRowView: View {
                         .foregroundColor(.blue)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .accessibilityLabel("View transcription")
+                .transcriptionActionAccessibility(action: .view)
             } else {
                 Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
                     showingTranscriptionDetail = true
                 }) {
                     Image(systemName: "arrow.clockwise")
@@ -370,7 +410,7 @@ struct RecordingRowView: View {
                         .foregroundColor(.blue)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .accessibilityLabel("Retry transcription")
+                .transcriptionActionAccessibility(action: .retry)
             }
         }
     }
@@ -441,6 +481,8 @@ struct RecordingRowView: View {
         NSPasteboard.general.setString(transcription, forType: .string)
         #endif
         
+        HapticFeedbackManager.shared.textCopied()
+        AccessibilityAnnouncementManager.shared.announceTextCopied()
         showingCopyConfirmation = true
     }
 }

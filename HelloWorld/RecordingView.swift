@@ -14,16 +14,23 @@ struct RecordingView: View {
                     Text("Recording Time")
                         .font(.headline)
                         .foregroundColor(.secondary)
+                        .transcriptionDynamicType()
                     
                     Text(recordingManager.formattedCurrentTime)
                         .font(.system(size: 48, weight: .light, design: .monospaced))
                         .foregroundColor(.primary)
+                        .transcriptionDynamicType()
+                        .transcriptionAccessibility(
+                            label: "Recording duration",
+                            value: recordingManager.formattedCurrentTime
+                        )
                 }
                 
                 Spacer()
                 
                 // Recording Button
                 Button(action: {
+                    HapticFeedbackManager.shared.buttonPressed()
                     if recordingManager.isRecording {
                         recordingManager.stopRecording()
                     } else {
@@ -52,12 +59,18 @@ struct RecordingView: View {
                     }
                 }
                 .scaleEffect(recordingManager.isRecording ? 1.1 : 1.0)
-                .animation(.easeInOut(duration: 0.2), value: recordingManager.isRecording)
+                .transcriptionReducedMotion(value: recordingManager.isRecording)
+                .transcriptionAccessibility(
+                    label: recordingManager.isRecording ? "Stop recording" : "Start recording",
+                    hint: recordingManager.isRecording ? "Stops the current recording" : "Starts a new audio recording",
+                    traits: .isButton
+                )
                 
                 // Status Text
                 Text(recordingManager.isRecording ? "Recording..." : "Tap to Record")
                     .font(.title2)
                     .foregroundColor(.secondary)
+                    .transcriptionDynamicType()
                 
                 Spacer()
                 
@@ -66,6 +79,11 @@ struct RecordingView: View {
                     Text("\(recordingManager.recordings.count) recordings saved")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .transcriptionDynamicType()
+                        .transcriptionAccessibility(
+                            label: "Recordings count",
+                            value: "\(recordingManager.recordings.count) recordings saved"
+                        )
                 }
             }
             .padding()
