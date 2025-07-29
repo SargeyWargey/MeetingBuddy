@@ -74,7 +74,7 @@ enum TranscriptionError: LocalizedError, Equatable {
         case .audioTooShort:
             return "Record for at least 3 seconds to enable transcription."
         case .audioTooLong:
-            return "Break longer recordings into segments under 10 minutes for better results."
+            return "Break longer recordings into segments under 1.5 hours for better results."
         case .noSpeechDetected:
             return "Make sure you're speaking clearly and the microphone can hear you."
         case .languageNotSupported:

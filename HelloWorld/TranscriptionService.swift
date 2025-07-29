@@ -559,7 +559,7 @@ class TranscriptionService: ObservableObject, TranscriptionServiceProtocol {
             throw TranscriptionError.audioTooShort
         }
         
-        if recording.duration > 600.0 { // 10 minutes
+        if recording.duration > 5400.0 { // 1.5 hours (90 minutes)
             throw TranscriptionError.audioTooLong
         }
         

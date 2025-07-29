@@ -72,23 +72,20 @@ class TranscriptionCache: ObservableObject {
     func getCachedTranscription(for audioURL: URL, parameters: TranscriptionParameters) async -> CachedTranscriptionResult? {
         let cacheKey = generateCacheKey(for: audioURL, with: parameters)
         
+        // Check metadata on main actor
+        guard let entry = metadata.entries[cacheKey] else {
+            return nil
+        }
+        
+        // Check if entry is expired
+        if Date().timeIntervalSince(entry.lastAccessed) > Self.maxCacheAge {
+            await removeEntry(cacheKey: cacheKey)
+            return nil
+        }
+        
         return await withCheckedContinuation { (continuation: CheckedContinuation<CachedTranscriptionResult?, Never>) in
             cacheQueue.async {
                 do {
-                    guard let entry = self.metadata.entries[cacheKey] else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    
-                    // Check if entry is expired
-                    if Date().timeIntervalSince(entry.lastAccessed) > Self.maxCacheAge {
-                        Task { @MainActor in
-                            await self.removeEntry(cacheKey: cacheKey)
-                        }
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    
                     let cacheFile = self.cacheDirectory.appendingPathComponent("\(cacheKey).cache")
                     guard self.fileManager.fileExists(atPath: cacheFile.path) else {
                         // Metadata exists but file is missing - clean up
@@ -225,28 +222,31 @@ class TranscriptionCache: ObservableObject {
     // MARK: - Metadata Persistence
     
     private func loadMetadata() async {
-        await withCheckedContinuation { continuation in
+        let loadedMetadata = await withCheckedContinuation { continuation in
             cacheQueue.async {
                 do {
                     if self.fileManager.fileExists(atPath: self.metadataFile.path) {
                         let data = try Data(contentsOf: self.metadataFile)
-                        self.metadata = try JSONDecoder().decode(CacheMetadata.self, from: data)
+                        let metadata = try JSONDecoder().decode(CacheMetadata.self, from: data)
+                        continuation.resume(returning: metadata)
+                    } else {
+                        continuation.resume(returning: CacheMetadata())
                     }
-                    continuation.resume()
                 } catch {
                     self.logger.error("Failed to load cache metadata: \(error.localizedDescription)")
-                    self.metadata = CacheMetadata()
-                    continuation.resume()
+                    continuation.resume(returning: CacheMetadata())
                 }
             }
         }
+        self.metadata = loadedMetadata
     }
     
     func saveMetadata() async {
+        let currentMetadata = self.metadata
         await withCheckedContinuation { continuation in
             cacheQueue.async(flags: .barrier) {
                 do {
-                    let data = try JSONEncoder().encode(self.metadata)
+                    let data = try JSONEncoder().encode(currentMetadata)
                     try data.write(to: self.metadataFile)
                     continuation.resume()
                 } catch {

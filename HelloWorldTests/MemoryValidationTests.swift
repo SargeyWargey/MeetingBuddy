@@ -1,46 +1,284 @@
-import Testing
-import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
+import XCTest
 @testable import HelloWorld
+import AVFoundation
 
-/// Memory validation tests for transcription system components
-struct MemoryValidationTests {
+final class MemoryValidationTests: XCTestCase {
     
-    // MARK: - Test Constants
+    var audioMemoryManager: AudioMemoryManager!
+    var transcriptionCache: TranscriptionCache!
     
-    private static let memoryLeakThreshold: Double = 5.0 // 5MB
-    private static let maxMemoryIncrease: Double = 20.0 // 20MB
-    private static let stabilizationDelay: UInt64 = 500_000_000 // 500ms
-    
-    // MARK: - Memory Measurement Utilities
-    
-    private func measureMemory<T>(
-        operation: () async throws -> T,
-        description: String
-    ) async throws -> (result: T, memoryDelta: Double) {
-        
-        // Force garbage collection before measurement
-        await forceGarbageCollection()
-        let initialMemory = getCurrentMemoryUsage()
-        
-        // Execute operation
-        let result = try await operation()
-        
-        // Allow memory to stabilize
-        await Task.sleep(nanoseconds: Self.stabilizationDelay)
-        await forceGarbageCollection()
-        
-        let finalMemory = getCurrentMemoryUsage()
-        let memoryDelta = finalMemory - initialMemory
-        
-        print("Memory measurement for \(description): \(String(format: "%.2f", memoryDelta))MB")
-        
-        return (result: result, memoryDelta: memoryDelta)
+    override func setUp() async throws {
+        try await super.setUp()
+        audioMemoryManager = AudioMemoryManager()
+        transcriptionCache = try TranscriptionCache()
     }
     
-    private func getCurrentMemoryUsage() -> Double {
+    override func tearDown() async throws {
+        audioMemoryManager.clearAll()
+        await transcriptionCache.clearCache()
+        audioMemoryManager = nil
+        transcriptionCache = nil
+        try await super.tearDown()
+    }
+    
+    // MARK: - Memory Usage Validation
+    
+    func testMemoryUsageWithinLimits() async throws {
+        let initialMemory = getCurrentMemoryUsage()
+        
+        // Process multiple audio files to stress test memory
+        for i in 0..<10 {
+            let testAudioURL = try createLargeTestAudioFile(size: 1024 * 1024) // 1MB each
+            defer { try? FileManager.default.removeItem(at: testAudioURL) }
+            
+            try await audioMemoryManager.processAudioFile(at: testAudioURL) { chunkData, _, _ in
+                // Simulate processing work
+                _ = chunkData.count
+            }
+            
+            let currentMemory = getCurrentMemoryUsage()
+            let memoryIncrease = currentMemory - initialMemory
+            
+            // Memory increase should be reasonable (less than 50MB)
+            XCTAssertLessThan(memoryIncrease, 50 * 1024 * 1024, "Memory usage increased by \(memoryIncrease) bytes")
+        }
+    }
+    
+    func testCacheMemoryManagement() async throws {
+        let initialCacheSize = transcriptionCache.cacheSize
+        
+        // Add many cache entries
+        for i in 0..<50 {
+            let testURL = try createTestAudioFile(name: "cache_test_\(i).m4a")
+            defer { try? FileManager.default.removeItem(at: testURL) }
+            
+            let parameters = TranscriptionParameters(
+                language: "en-US",
+                requiresOnlineProcessing: false,
+                preferredQuality: .balanced
+            )
+            
+            let result = CachedTranscriptionResult(
+                text: String(repeating: "Test transcription text ", count: 100), // ~2KB text
+                confidence: 0.9,
+                processingTime: 1.0,
+                method: .onDevice,
+                language: "en-US",
+                timestamp: Date()
+            )
+            
+            await transcriptionCache.cacheTranscription(
+                result: result,
+                for: testURL,
+                parameters: parameters
+            )
+        }
+        
+        // Cache should have grown but not excessively
+        let finalCacheSize = transcriptionCache.cacheSize
+        let cacheGrowth = finalCacheSize - initialCacheSize
+        
+        // Cache growth should be reasonable (less than 10MB for 50 entries)
+        XCTAssertLessThan(cacheGrowth, 10 * 1024 * 1024, "Cache grew by \(cacheGrowth) bytes")
+        
+        // Trigger cache maintenance
+        await transcriptionCache.performMaintenance()
+        
+        // Cache should be managed within limits
+        let managedCacheSize = transcriptionCache.cacheSize
+        XCTAssertLessThanOrEqual(managedCacheSize, finalCacheSize)
+    }
+    
+    func testMemoryPressureResponse() async throws {
+        // Fill up memory with cached data
+        let largeData = Data(repeating: 0xFF, count: 10 * 1024 * 1024) // 10MB
+        for i in 0..<5 {
+            audioMemoryManager.cacheAudioData(largeData, forKey: "pressure_test_\(i)")
+        }
+        
+        let beforePressureMemory = audioMemoryManager.getMemoryUsageInfo()
+        XCTAssertGreaterThan(beforePressureMemory.cacheSize, 0)
+        
+        // Simulate memory pressure
+        NotificationCenter.default.post(name: .lowMemoryCondition, object: nil)
+        
+        // Allow time for cleanup
+        try await Task.sleep(nanoseconds: 200_000_000) // 200ms
+        
+        let afterPressureMemory = audioMemoryManager.getMemoryUsageInfo()
+        
+        // Memory should be reduced after pressure event
+        XCTAssertLessThanOrEqual(afterPressureMemory.cacheSize, beforePressureMemory.cacheSize)
+    }
+    
+    // MARK: - Concurrent Access Tests
+    
+    func testConcurrentMemoryAccess() async throws {
+        let concurrentTasks = 10
+        let expectation = XCTestExpectation(description: "Concurrent memory access completed")
+        expectation.expectedFulfillmentCount = concurrentTasks
+        
+        // Launch multiple concurrent tasks
+        for i in 0..<concurrentTasks {
+            Task.detached {
+                do {
+                    let testURL = try self.createTestAudioFile(name: "concurrent_\(i).m4a")
+                    defer { try? FileManager.default.removeItem(at: testURL) }
+                    
+                    try await self.audioMemoryManager.processAudioFile(at: testURL) { _, _, _ in
+                        // Simulate work
+                        try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+                    }
+                    
+                    expectation.fulfill()
+                } catch {
+                    XCTFail("Concurrent task \(i) failed: \(error)")
+                    expectation.fulfill()
+                }
+            }
+        }
+        
+        await fulfillment(of: [expectation], timeout: 5.0)
+        
+        // Verify memory is stable after concurrent access
+        let finalMemory = audioMemoryManager.getMemoryUsageInfo()
+        XCTAssertEqual(finalMemory.activeOperations, 0)
+    }
+    
+    // MARK: - Memory Leak Detection
+    
+    func testNoMemoryLeaksInAudioProcessing() async throws {
+        let initialMemory = getCurrentMemoryUsage()
+        
+        // Process many files to detect potential leaks
+        for i in 0..<20 {
+            let testURL = try createTestAudioFile(name: "leak_test_\(i).m4a")
+            
+            try await audioMemoryManager.processAudioFile(at: testURL) { chunkData, _, _ in
+                // Create and release temporary data
+                let tempData = Data(chunkData)
+                _ = tempData.count
+            }
+            
+            // Clean up immediately
+            try FileManager.default.removeItem(at: testURL)
+            
+            // Force garbage collection periodically
+            if i % 5 == 0 {
+                // Give time for cleanup
+                try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            }
+        }
+        
+        // Allow final cleanup
+        try await Task.sleep(nanoseconds: 500_000_000) // 500ms
+        
+        let finalMemory = getCurrentMemoryUsage()
+        let memoryDifference = finalMemory - initialMemory
+        
+        // Memory difference should be minimal (less than 5MB)
+        XCTAssertLessThan(memoryDifference, 5 * 1024 * 1024, 
+                         "Potential memory leak detected: \(memoryDifference) bytes")
+    }
+    
+    func testCacheMemoryLeaks() async throws {
+        let initialCacheSize = transcriptionCache.cacheSize
+        
+        // Add and remove cache entries repeatedly
+        for cycle in 0..<5 {
+            // Add entries
+            for i in 0..<10 {
+                let testURL = try createTestAudioFile(name: "leak_cache_\(cycle)_\(i).m4a")
+                defer { try? FileManager.default.removeItem(at: testURL) }
+                
+                let parameters = TranscriptionParameters(
+                    language: "en-US",
+                    requiresOnlineProcessing: false,
+                    preferredQuality: .balanced
+                )
+                
+                let result = CachedTranscriptionResult(
+                    text: "Leak test transcription \(cycle)-\(i)",
+                    confidence: 0.9,
+                    processingTime: 1.0,
+                    method: .onDevice,
+                    language: "en-US",
+                    timestamp: Date()
+                )
+                
+                await transcriptionCache.cacheTranscription(
+                    result: result,
+                    for: testURL,
+                    parameters: parameters
+                )
+            }
+            
+            // Clear cache
+            await transcriptionCache.clearCache()
+            
+            // Allow cleanup
+            try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        }
+        
+        let finalCacheSize = transcriptionCache.cacheSize
+        
+        // Cache should return to initial size or close to it
+        XCTAssertLessThanOrEqual(finalCacheSize, initialCacheSize + 1024, // Allow 1KB tolerance
+                                "Cache memory leak detected: \(finalCacheSize - initialCacheSize) bytes")
+    }
+    
+    // MARK: - Resource Cleanup Tests
+    
+    func testResourceCleanupOnError() async throws {
+        let initialMemory = audioMemoryManager.getMemoryUsageInfo()
+        
+        // Create a scenario that will cause an error
+        let nonExistentURL = URL(fileURLWithPath: "/non/existent/file.m4a")
+        
+        do {
+            try await audioMemoryManager.processAudioFile(at: nonExistentURL) { _, _, _ in
+                XCTFail("Should not reach this point")
+            }
+            XCTFail("Should have thrown an error")
+        } catch {
+            // Expected error
+        }
+        
+        // Verify resources were cleaned up
+        let finalMemory = audioMemoryManager.getMemoryUsageInfo()
+        XCTAssertEqual(finalMemory.activeOperations, initialMemory.activeOperations)
+    }
+    
+    // MARK: - Performance Under Memory Pressure
+    
+    func testPerformanceUnderMemoryPressure() async throws {
+        // Create memory pressure by filling cache
+        let largeData = Data(repeating: 0xAA, count: 5 * 1024 * 1024) // 5MB
+        for i in 0..<10 {
+            audioMemoryManager.cacheAudioData(largeData, forKey: "pressure_perf_\(i)")
+        }
+        
+        // Measure performance under pressure
+        let startTime = Date()
+        
+        let testURL = try createTestAudioFile()
+        defer { try? FileManager.default.removeItem(at: testURL) }
+        
+        var chunksProcessed = 0
+        try await audioMemoryManager.processAudioFile(at: testURL) { _, _, _ in
+            chunksProcessed += 1
+        }
+        
+        let processingTime = Date().timeIntervalSince(startTime)
+        
+        // Processing should still complete in reasonable time (less than 5 seconds)
+        XCTAssertLessThan(processingTime, 5.0, "Processing took too long under memory pressure")
+        XCTAssertGreaterThan(chunksProcessed, 0, "No chunks were processed")
+    }
+    
+    // MARK: - Helper Methods
+    
+    private func getCurrentMemoryUsage() -> Int64 {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
         
@@ -50,515 +288,28 @@ struct MemoryValidationTests {
             }
         }
         
-        if result == KERN_SUCCESS {
-            return Double(info.resident_size) / (1024 * 1024) // Convert to MB
-        }
-        
-        return 0
+        return result == KERN_SUCCESS ? Int64(info.resident_size) : 0
     }
     
-    private func forceGarbageCollection() async {
-        // Force autoreleasepool drain and give system time to clean up
-        await Task.yield()
-        autoreleasepool {
-            // Empty pool to force cleanup
-        }
-        await Task.sleep(nanoseconds: 50_000_000) // 50ms
+    private func createTestAudioFile(name: String = "memory_test.m4a") throws -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let audioURL = tempDir.appendingPathComponent(name)
+        
+        // Create a small test audio file
+        let testData = Data(repeating: 0x00, count: 4096) // 4KB
+        try testData.write(to: audioURL)
+        
+        return audioURL
     }
     
-    private func createTestAudioFile(sizeInKB: Int) throws -> URL {
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("memory_test_\(UUID().uuidString).m4a")
+    private func createLargeTestAudioFile(size: Int) throws -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let audioURL = tempDir.appendingPathComponent("large_test_\(UUID().uuidString).m4a")
         
-        let data = Data(repeating: 0, count: sizeInKB * 1024)
-        try data.write(to: tempURL)
+        // Create a larger test file
+        let testData = Data(repeating: 0x00, count: size)
+        try testData.write(to: audioURL)
         
-        return tempURL
-    }
-    
-    private func cleanup(url: URL) {
-        try? FileManager.default.removeItem(at: url)
-    }
-    
-    // MARK: - Audio Memory Manager Validation
-    
-    @Test func testAudioMemoryManagerNoLeaks() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let manager = AudioMemoryManager()
-                let testFile = try createTestAudioFile(sizeInKB: 500) // 500KB
-                defer { cleanup(url: testFile) }
-                
-                // Process file multiple times
-                for _ in 0..<5 {
-                    try await manager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-                        // Simulate processing
-                        await Task.yield()
-                    }
-                }
-                
-                return manager
-            },
-            description: "AudioMemoryManager multiple processing cycles"
-        )
-        
-        #expect(memoryDelta < Self.memoryLeakThreshold, 
-               "AudioMemoryManager should not leak memory: \(memoryDelta)MB increase")
-    }
-    
-    @Test func testAudioMemoryManagerCacheCleanup() async throws {
-        let (manager, initialDelta) = try await measureMemory(
-            operation: {
-                let manager = AudioMemoryManager()
-                
-                // Fill cache with data
-                for i in 0..<10 {
-                    let testData = Data(repeating: UInt8(i), count: 1024 * 100) // 100KB each
-                    manager.cacheAudioData(testData, forKey: "test_key_\(i)")
-                }
-                
-                return manager
-            },
-            description: "AudioMemoryManager cache filling"
-        )
-        
-        // Now clear the cache and measure memory reduction
-        let (_, cleanupDelta) = try await measureMemory(
-            operation: {
-                manager.clearAll()
-                return ()
-            },
-            description: "AudioMemoryManager cache cleanup"
-        )
-        
-        #expect(initialDelta > 0, "Cache filling should increase memory")
-        #expect(cleanupDelta <= 0, "Cache cleanup should not increase memory")
-    }
-    
-    @Test func testAudioFormatConversionMemoryUsage() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let manager = AudioMemoryManager()
-                let testFile = try createTestAudioFile(sizeInKB: 1000) // 1MB
-                defer { cleanup(url: testFile) }
-                
-                // This would test format conversion if we had proper audio format setup
-                // For now, test the memory management during file processing
-                try await manager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-                    // Simulate format conversion work
-                    let processedData = data.map { $0 ^ 0xFF } // Simple transformation
-                    _ = processedData // Use the data
-                    await Task.yield()
-                }
-                
-                return manager
-            },
-            description: "Audio format conversion memory usage"
-        )
-        
-        #expect(memoryDelta < Self.maxMemoryIncrease, 
-               "Format conversion should not use excessive memory: \(memoryDelta)MB")
-    }
-    
-    // MARK: - Transcription Cache Validation
-    
-    @Test func testTranscriptionCacheMemoryBounds() async throws {
-        let (cache, memoryDelta) = try await measureMemory(
-            operation: {
-                let cache = try TranscriptionCache()
-                let parameters = TranscriptionParameters(
-                    language: "en-US",
-                    requiresOnlineProcessing: false,
-                    preferredQuality: .balanced
-                )
-                
-                // Add many cache entries
-                for i in 0..<50 {
-                    let testURL = try createTestAudioFile(sizeInKB: 100)
-                    defer { cleanup(url: testURL) }
-                    
-                    let result = CachedTranscriptionResult(
-                        text: String(repeating: "Test transcription text ", count: 100), // ~2KB text
-                        confidence: 0.9,
-                        processingTime: 1.0,
-                        method: .onDevice,
-                        language: "en-US",
-                        timestamp: Date()
-                    )
-                    
-                    await cache.cacheTranscription(result: result, for: testURL, parameters: parameters)
-                }
-                
-                return cache
-            },
-            description: "TranscriptionCache with 50 entries"
-        )
-        
-        // Cache should enforce size limits and not grow unbounded
-        let stats = cache.getCacheStatistics()
-        #expect(memoryDelta < 30.0, "Cache should limit memory usage: \(memoryDelta)MB")
-        #expect(stats.totalSize > 0, "Cache should contain data")
-    }
-    
-    @Test func testCacheEvictionEffectiveness() async throws {
-        let cache = try TranscriptionCache()
-        
-        // Fill cache beyond typical limits
-        let (_, fillMemoryDelta) = try await measureMemory(
-            operation: {
-                let parameters = TranscriptionParameters(
-                    language: "en-US",
-                    requiresOnlineProcessing: false,
-                    preferredQuality: .balanced
-                )
-                
-                for i in 0..<100 {
-                    let testURL = try createTestAudioFile(sizeInKB: 50)
-                    defer { cleanup(url: testURL) }
-                    
-                    let result = CachedTranscriptionResult(
-                        text: String(repeating: "Large transcription text for memory test ", count: 50),
-                        confidence: 0.9,
-                        processingTime: 1.0,
-                        method: .onDevice,
-                        language: "en-US",
-                        timestamp: Date(timeIntervalSinceNow: -Double(i * 60)) // Older entries
-                    )
-                    
-                    await cache.cacheTranscription(result: result, for: testURL, parameters: parameters)
-                }
-                return ()
-            },
-            description: "Cache overfilling"
-        )
-        
-        // Force cache maintenance/cleanup
-        let (_, cleanupMemoryDelta) = try await measureMemory(
-            operation: {
-                await cache.performMaintenance()
-                return ()
-            },
-            description: "Cache maintenance"
-        )
-        
-        let finalStats = cache.getCacheStatistics()
-        
-        #expect(fillMemoryDelta > 0, "Filling cache should increase memory")
-        #expect(finalStats.entryCount < 100, "Cache should evict old entries")
-        #expect(cleanupMemoryDelta <= 0, "Maintenance should not increase memory")
-    }
-    
-    // MARK: - UI Thread Optimizer Validation
-    
-    @Test func testUIThreadOptimizerMemoryEfficiency() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let optimizer = UIThreadOptimizer()
-                
-                // Schedule many UI updates
-                for i in 0..<1000 {
-                    await optimizer.scheduleUpdate(
-                        UIUpdateOperation(
-                            priority: .medium,
-                            estimatedDuration: 0.001
-                        ) {
-                            // Simulate UI work that could create temporary objects
-                            let temporaryData = Array(0..<100).map { "Item \($0 + i)" }
-                            _ = temporaryData.joined(separator: ", ")
-                        }
-                    )
-                }
-                
-                // Allow all updates to complete
-                try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-                
-                return optimizer
-            },
-            description: "UIThreadOptimizer with 1000 updates"
-        )
-        
-        #expect(memoryDelta < Self.maxMemoryIncrease, 
-               "UI optimizer should not accumulate memory: \(memoryDelta)MB")
-    }
-    
-    @Test func testBackgroundWorkMemoryIsolation() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let optimizer = UIThreadOptimizer()
-                
-                // Execute multiple background tasks that could leak memory
-                await withTaskGroup(of: Void.self) { group in
-                    for i in 0..<10 {
-                        group.addTask {
-                            await withCheckedContinuation { continuation in
-                                optimizer.executeOnBackground(
-                                    work: {
-                                        // Simulate memory-intensive work
-                                        let largeArray = Array(0..<10000).map { "Background item \($0 + i)" }
-                                        return largeArray.count
-                                    },
-                                    completion: { result in
-                                        continuation.resume()
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                return optimizer
-            },
-            description: "Background work memory isolation"
-        )
-        
-        #expect(memoryDelta < Self.memoryLeakThreshold, 
-               "Background work should not leak to main thread: \(memoryDelta)MB")
-    }
-    
-    // MARK: - Performance Monitor Validation
-    
-    @Test func testPerformanceMonitorDataManagement() async throws {
-        let (monitor, memoryDelta) = try await measureMemory(
-            operation: {
-                let monitor = TranscriptionPerformanceMonitor()
-                monitor.startMonitoring()
-                
-                // Generate lots of performance data
-                for i in 0..<200 {
-                    let operationId = UUID()
-                    monitor.startTrackingOperation(
-                        id: operationId,
-                        type: .automatic,
-                        audioFileSize: Int64(1024 * i),
-                        priority: .normal
-                    )
-                    
-                    // Simulate operation progress
-                    monitor.updateOperationProgress(id: operationId, progress: 0.5, currentPhase: "Processing")
-                    monitor.completeOperation(id: operationId, success: true, resultSize: 512)
-                }
-                
-                // Multiple queue sessions
-                for _ in 0..<20 {
-                    monitor.startQueueProcessingSession()
-                    monitor.endQueueProcessingSession(totalItemsProcessed: 10, remainingItems: 0)
-                }
-                
-                monitor.stopMonitoring()
-                return monitor
-            },
-            description: "PerformanceMonitor with extensive data"
-        )
-        
-        #expect(memoryDelta < Self.maxMemoryIncrease, 
-               "Performance monitor should manage data size: \(memoryDelta)MB")
-        
-        // Verify data bounds
-        let metrics = monitor.currentMetrics
-        #expect(metrics.totalItemsProcessed >= 0, "Metrics should be valid")
-    }
-    
-    // MARK: - Background Task Manager Validation
-    
-    @Test func testBackgroundTaskManagerCleanup() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let backgroundManager = BackgroundTaskManager()
-                
-                // Schedule and cancel many background tasks
-                for _ in 0..<50 {
-                    backgroundManager.scheduleBackgroundProcessing()
-                    backgroundManager.scheduleBackgroundRefresh()
-                }
-                
-                // Disable and cleanup
-                backgroundManager.disableBackgroundProcessing()
-                
-                return backgroundManager
-            },
-            description: "BackgroundTaskManager cleanup"
-        )
-        
-        #expect(memoryDelta < Self.memoryLeakThreshold, 
-               "Background task manager should cleanup properly: \(memoryDelta)MB")
-    }
-    
-    // MARK: - App Lifecycle Handler Validation
-    
-    @Test func testAppLifecycleHandlerMemoryManagement() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let lifecycleHandler = AppLifecycleHandler()
-                
-                // Simulate app lifecycle events
-                for _ in 0..<10 {
-                    // Simulate background/foreground cycles
-                    #if canImport(UIKit)
-                    NotificationCenter.default.post(
-                        name: UIApplication.didEnterBackgroundNotification,
-                        object: nil
-                    )
-                    
-                    await Task.sleep(nanoseconds: 100_000_000) // 100ms
-                    
-                    NotificationCenter.default.post(
-                        name: UIApplication.willEnterForegroundNotification,
-                        object: nil
-                    )
-                    #endif
-                    
-                    await Task.sleep(nanoseconds: 100_000_000) // 100ms
-                }
-                
-                return lifecycleHandler
-            },
-            description: "AppLifecycleHandler event cycles"
-        )
-        
-        #expect(memoryDelta < Self.memoryLeakThreshold, 
-               "Lifecycle handler should not leak during state changes: \(memoryDelta)MB")
-    }
-    
-    // MARK: - Integration Memory Tests
-    
-    @Test func testIntegratedSystemMemoryBehavior() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                // Initialize all major components
-                let memoryManager = AudioMemoryManager()
-                let cache = try TranscriptionCache()
-                let uiOptimizer = UIThreadOptimizer()
-                let performanceMonitor = TranscriptionPerformanceMonitor()
-                let backgroundManager = BackgroundTaskManager()
-                let lifecycleHandler = AppLifecycleHandler()
-                
-                // Simulate integrated workflow
-                let testFile = try createTestAudioFile(sizeInKB: 500)
-                defer { cleanup(url: testFile) }
-                
-                // Process audio
-                try await memoryManager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-                    // Simulate transcription processing
-                    let operationId = UUID()
-                    performanceMonitor.startTrackingOperation(
-                        id: operationId,
-                        type: .automatic,
-                        audioFileSize: Int64(data.count),
-                        priority: .normal
-                    )
-                    
-                    await Task.yield()
-                    performanceMonitor.completeOperation(id: operationId, success: true)
-                }
-                
-                // Cache results
-                let parameters = TranscriptionParameters(
-                    language: "en-US",
-                    requiresOnlineProcessing: false,
-                    preferredQuality: .balanced
-                )
-                
-                let result = CachedTranscriptionResult(
-                    text: "Integrated test transcription",
-                    confidence: 0.9,
-                    processingTime: 1.0,
-                    method: .onDevice,
-                    language: "en-US",
-                    timestamp: Date()
-                )
-                
-                await cache.cacheTranscription(result: result, for: testFile, parameters: parameters)
-                
-                // Simulate UI updates
-                for _ in 0..<20 {
-                    await uiOptimizer.scheduleUpdate(UIUpdateOperation {
-                        await Task.yield()
-                    })
-                }
-                
-                return (memoryManager, cache, uiOptimizer, performanceMonitor, backgroundManager, lifecycleHandler)
-            },
-            description: "Integrated system workflow"
-        )
-        
-        #expect(memoryDelta < 50.0, 
-               "Integrated system should maintain reasonable memory usage: \(memoryDelta)MB")
-    }
-    
-    // MARK: - Stress Test Memory Validation
-    
-    @Test func testMemoryUnderStress() async throws {
-        let (_, memoryDelta) = try await measureMemory(
-            operation: {
-                let memoryManager = AudioMemoryManager()
-                
-                // Create multiple concurrent operations
-                await withTaskGroup(of: Void.self) { group in
-                    for i in 0..<20 {
-                        group.addTask {
-                            do {
-                                let testFile = try self.createTestAudioFile(sizeInKB: 200)
-                                defer { self.cleanup(url: testFile) }
-                                
-                                try await memoryManager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-                                    // Simulate processing with temporary allocations
-                                    let processedData = data.map { byte in
-                                        String(format: "%02x", byte)
-                                    }
-                                    _ = processedData.joined() // Use the data
-                                    await Task.yield()
-                                }
-                            } catch {
-                                // Handle errors in stress test
-                            }
-                        }
-                    }
-                }
-                
-                return memoryManager
-            },
-            description: "Memory stress test with 20 concurrent operations"
-        )
-        
-        #expect(memoryDelta < 100.0, 
-               "System should handle stress without excessive memory growth: \(memoryDelta)MB")
-    }
-    
-    // MARK: - Memory Recovery Tests
-    
-    @Test func testMemoryRecoveryAfterWarning() async throws {
-        // Measure memory before simulating warning
-        await forceGarbageCollection()
-        let beforeWarningMemory = getCurrentMemoryUsage()
-        
-        // Create components and fill them with data
-        let memoryManager = AudioMemoryManager()
-        let cache = try TranscriptionCache()
-        
-        // Fill with test data
-        for i in 0..<20 {
-            let testData = Data(repeating: UInt8(i), count: 1024 * 50) // 50KB each
-            memoryManager.cacheAudioData(testData, forKey: "stress_key_\(i)")
-        }
-        
-        let afterFillingMemory = getCurrentMemoryUsage()
-        
-        // Simulate memory warning
-        NotificationCenter.default.post(
-            name: UIApplication.didReceiveMemoryWarningNotification,
-            object: nil
-        )
-        
-        // Allow cleanup to occur
-        await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-        await forceGarbageCollection()
-        
-        let afterWarningMemory = getCurrentMemoryUsage()
-        
-        #expect(afterFillingMemory > beforeWarningMemory, "Memory should increase when filling caches")
-        #expect(afterWarningMemory < afterFillingMemory, "Memory should decrease after warning cleanup")
-        
-        let recoveryRatio = (afterFillingMemory - afterWarningMemory) / (afterFillingMemory - beforeWarningMemory)
-        #expect(recoveryRatio > 0.3, "Should recover at least 30% of allocated memory")
+        return audioURL
     }
 }

@@ -214,7 +214,7 @@ class BackgroundTaskManager: ObservableObject {
     // MARK: - Immediate Background Task Management
     
     private func startBackgroundTask() async {
-        backgroundTaskIdentifier = await UIApplication.shared.beginBackgroundTask(withName: "TranscriptionProcessing") { [weak self] in
+        backgroundTaskIdentifier = UIApplication.shared.beginBackgroundTask(withName: "TranscriptionProcessing") { [weak self] in
             Task { @MainActor [weak self] in
                 await self?.endBackgroundTask()
             }
@@ -225,7 +225,7 @@ class BackgroundTaskManager: ObservableObject {
             
             // Process transcriptions for remaining background time
             if let transcriptionService = transcriptionService {
-                let remainingTime = await UIApplication.shared.backgroundTimeRemaining
+                let remainingTime = UIApplication.shared.backgroundTimeRemaining
                 let maxProcessingTime = max(remainingTime - 5.0, 0) // Leave 5 seconds buffer
                 
                 _ = await transcriptionService.processQueuedTranscriptions(maxProcessingTime: maxProcessingTime)
@@ -238,7 +238,7 @@ class BackgroundTaskManager: ObservableObject {
     private func endBackgroundTask() async {
         if backgroundTaskIdentifier != .invalid {
             activeBackgroundTasks.remove(backgroundTaskIdentifier)
-            await UIApplication.shared.endBackgroundTask(backgroundTaskIdentifier)
+            UIApplication.shared.endBackgroundTask(backgroundTaskIdentifier)
             backgroundTaskIdentifier = .invalid
         }
     }
@@ -265,7 +265,7 @@ class BackgroundTaskManager: ObservableObject {
         NotificationCenter.default.removeObserver(self)
         Task { @MainActor [backgroundTaskIdentifier] in
             if backgroundTaskIdentifier != .invalid {
-                await UIApplication.shared.endBackgroundTask(backgroundTaskIdentifier)
+                UIApplication.shared.endBackgroundTask(backgroundTaskIdentifier)
             }
         }
     }

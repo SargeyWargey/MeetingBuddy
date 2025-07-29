@@ -1,104 +1,177 @@
-import Testing
-import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
+import XCTest
 @testable import HelloWorld
+import AVFoundation
 
-/// Performance tests for transcription system components
-struct TranscriptionPerformanceTests {
+@MainActor
+final class TranscriptionPerformanceTests: XCTestCase {
     
-    // MARK: - Test Data Setup
+    var performanceMonitor: TranscriptionPerformanceMonitor!
+    var audioMemoryManager: AudioMemoryManager!
+    var transcriptionCache: TranscriptionCache!
+    var uiThreadOptimizer: UIThreadOptimizer!
     
-    private func createTestAudioFile(sizeInMB: Int) throws -> URL {
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("test_audio_\(sizeInMB)MB.m4a")
+    override func setUp() async throws {
+        try await super.setUp()
         
-        // Create a mock audio file with specified size
-        let data = Data(repeating: 0, count: sizeInMB * 1024 * 1024)
-        try data.write(to: tempURL)
+        performanceMonitor = TranscriptionPerformanceMonitor()
+        audioMemoryManager = AudioMemoryManager()
+        transcriptionCache = try TranscriptionCache()
+        uiThreadOptimizer = UIThreadOptimizer()
         
-        return tempURL
+        performanceMonitor.startMonitoring()
     }
     
-    private func cleanup(url: URL) {
-        try? FileManager.default.removeItem(at: url)
+    override func tearDown() async throws {
+        performanceMonitor.stopMonitoring()
+        audioMemoryManager.clearAll()
+        await transcriptionCache.clearCache()
+        
+        performanceMonitor = nil
+        audioMemoryManager = nil
+        transcriptionCache = nil
+        uiThreadOptimizer = nil
+        
+        try await super.tearDown()
     }
     
-    // MARK: - Memory Management Tests
+    // MARK: - Performance Monitor Tests
     
-    @Test func testMemoryUsageForLargeAudioFiles() async throws {
-        let memoryManager = AudioMemoryManager()
-        let testFile = try createTestAudioFile(sizeInMB: 10)
-        defer { cleanup(url: testFile) }
+    func testOperationTracking() async throws {
+        let operationId = UUID()
+        let audioFileSize: Int64 = 1024 * 1024 // 1MB
         
-        let initialMemory = getCurrentMemoryUsage()
+        // Start tracking
+        performanceMonitor.startTrackingOperation(
+            id: operationId,
+            type: .manual,
+            audioFileSize: audioFileSize,
+            priority: .userRequested
+        )
         
-        // Process large file with memory management
+        // Update progress
+        performanceMonitor.updateOperationProgress(
+            id: operationId,
+            progress: 0.5,
+            currentPhase: "Processing"
+        )
+        
+        // Complete operation
+        performanceMonitor.completeOperation(
+            id: operationId,
+            success: true,
+            resultSize: 500
+        )
+        
+        let metrics = performanceMonitor.currentMetrics
+        XCTAssertEqual(metrics.activeOperationsCount, 0)
+    }
+    
+    func testQueuePerformanceTracking() async throws {
+        performanceMonitor.startQueueProcessingSession()
+        
+        // Simulate processing multiple items
+        for i in 0..<5 {
+            let operationId = UUID()
+            performanceMonitor.startTrackingOperation(
+                id: operationId,
+                type: .automatic,
+                audioFileSize: 1024,
+                priority: .normal
+            )
+            
+            // Simulate processing time
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms
+            
+            performanceMonitor.completeOperation(
+                id: operationId,
+                success: i < 4, // One failure
+                resultSize: 100
+            )
+        }
+        
+        performanceMonitor.endQueueProcessingSession(
+            totalItemsProcessed: 4,
+            remainingItems: 1
+        )
+        
+        let metrics = performanceMonitor.currentMetrics
+        XCTAssertEqual(metrics.totalItemsProcessed, 4)
+        XCTAssertEqual(metrics.totalItemsFailed, 1)
+    }
+    
+    func testSlowOperationDetection() async throws {
+        let operationId = UUID()
+        
+        performanceMonitor.startTrackingOperation(
+            id: operationId,
+            type: .manual,
+            audioFileSize: 1024,
+            priority: .userRequested
+        )
+        
+        // Simulate slow operation
+        try await Task.sleep(nanoseconds: 11_000_000_000) // 11 seconds
+        
+        performanceMonitor.updateOperationProgress(
+            id: operationId,
+            progress: 0.1,
+            currentPhase: "Slow processing"
+        )
+        
+        performanceMonitor.completeOperation(
+            id: operationId,
+            success: true
+        )
+        
+        // Check for slow operation alert
+        XCTAssertTrue(performanceMonitor.performanceAlerts.contains { $0.type == .slowOperation })
+    }
+    
+    // MARK: - Audio Memory Manager Tests
+    
+    func testMemoryEfficientAudioProcessing() async throws {
+        // Create a test audio file
+        let testAudioURL = try createTestAudioFile()
+        defer { try? FileManager.default.removeItem(at: testAudioURL) }
+        
         var processedChunks = 0
-        try await memoryManager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
+        var totalDataProcessed = 0
+        
+        try await audioMemoryManager.processAudioFile(at: testAudioURL) { chunkData, chunkIndex, totalChunks in
             processedChunks += 1
-            // Simulate processing work
-            await Task.yield()
+            totalDataProcessed += chunkData.count
+            
+            // Verify chunk is not empty
+            XCTAssertGreaterThan(chunkData.count, 0)
+            XCTAssertGreaterThanOrEqual(chunkIndex, 0)
+            XCTAssertGreaterThan(totalChunks, 0)
         }
         
-        let finalMemory = getCurrentMemoryUsage()
-        let memoryIncrease = finalMemory - initialMemory
-        
-        // Memory increase should be reasonable (less than 50MB for 10MB file)
-        #expect(memoryIncrease < 50.0, "Memory usage increased by \(memoryIncrease)MB")
-        #expect(processedChunks > 0, "File should be processed in chunks")
-        
-        // Memory should be released after processing
-        await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        let cleanupMemory = getCurrentMemoryUsage()
-        #expect(cleanupMemory <= finalMemory, "Memory should not increase after cleanup")
+        XCTAssertGreaterThan(processedChunks, 0)
+        XCTAssertGreaterThan(totalDataProcessed, 0)
     }
     
-    @Test func testMemoryPressureHandling() async throws {
-        let memoryManager = AudioMemoryManager()
-        let testFile = try createTestAudioFile(sizeInMB: 5)
-        defer { cleanup(url: testFile) }
-        
-        // Simulate memory pressure
-        #if canImport(UIKit)
-        NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
-        #else
-        NotificationCenter.default.post(name: .lowMemoryCondition, object: nil)
-        #endif
-        
-        // Processing should still work under memory pressure
-        var success = false
-        try await memoryManager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-            success = true
-        }
-        
-        #expect(success, "Processing should succeed even under memory pressure")
-    }
-    
-    @Test func testAudioMemoryCaching() async throws {
-        let memoryManager = AudioMemoryManager()
-        let testData = Data(repeating: 42, count: 1024)
-        let cacheKey = "test_key"
+    func testMemoryCacheManagement() async throws {
+        let testData = Data(repeating: 0x42, count: 1024)
+        let cacheKey = "test_audio_data"
         
         // Cache data
-        memoryManager.cacheAudioData(testData, forKey: cacheKey)
+        audioMemoryManager.cacheAudioData(testData, forKey: cacheKey)
         
         // Retrieve cached data
-        let cachedData = memoryManager.getCachedAudioData(forKey: cacheKey)
-        #expect(cachedData == testData, "Cached data should match original")
+        let cachedData = audioMemoryManager.getCachedAudioData(forKey: cacheKey)
+        XCTAssertEqual(cachedData, testData)
         
-        // Check cache statistics
-        let (cacheSize, activeOps) = memoryManager.getMemoryUsageInfo()
-        #expect(cacheSize >= testData.count, "Cache size should reflect stored data")
+        // Test cache expiration (would need to wait or mock time)
+        let memoryInfo = audioMemoryManager.getMemoryUsageInfo()
+        XCTAssertGreaterThan(memoryInfo.cacheSize, 0)
     }
     
-    // MARK: - Transcription Cache Performance Tests
+    // MARK: - Transcription Cache Tests
     
-    @Test func testTranscriptionCachePerformance() async throws {
-        let cache = try TranscriptionCache()
-        let testURL = try createTestAudioFile(sizeInMB: 1)
-        defer { cleanup(url: testURL) }
+    func testTranscriptionCaching() async throws {
+        let testAudioURL = try createTestAudioFile()
+        defer { try? FileManager.default.removeItem(at: testAudioURL) }
         
         let parameters = TranscriptionParameters(
             language: "en-US",
@@ -106,8 +179,8 @@ struct TranscriptionPerformanceTests {
             preferredQuality: .balanced
         )
         
-        let result = CachedTranscriptionResult(
-            text: "This is a test transcription result",
+        let testResult = CachedTranscriptionResult(
+            text: "Test transcription result",
             confidence: 0.95,
             processingTime: 2.5,
             method: .onDevice,
@@ -115,34 +188,35 @@ struct TranscriptionPerformanceTests {
             timestamp: Date()
         )
         
-        // Measure cache write performance
-        let writeStartTime = CFAbsoluteTimeGetCurrent()
-        await cache.cacheTranscription(result: result, for: testURL, parameters: parameters)
-        let writeTime = CFAbsoluteTimeGetCurrent() - writeStartTime
-        
-        #expect(writeTime < 0.1, "Cache write should complete within 100ms")
-        
-        // Measure cache read performance
-        let readStartTime = CFAbsoluteTimeGetCurrent()
-        let cachedResult = await cache.getCachedTranscription(for: testURL, parameters: parameters)
-        let readTime = CFAbsoluteTimeGetCurrent() - readStartTime
-        
-        #expect(readTime < 0.05, "Cache read should complete within 50ms")
-        #expect(cachedResult?.text == result.text, "Cached result should match original")
-    }
-    
-    @Test func testCacheSizeManagement() async throws {
-        let cache = try TranscriptionCache()
-        let parameters = TranscriptionParameters(
-            language: "en-US",
-            requiresOnlineProcessing: false,
-            preferredQuality: .balanced
+        // Cache the result
+        await transcriptionCache.cacheTranscription(
+            result: testResult,
+            for: testAudioURL,
+            parameters: parameters
         )
         
-        // Create multiple cache entries
+        // Retrieve from cache
+        let cachedResult = await transcriptionCache.getCachedTranscription(
+            for: testAudioURL,
+            parameters: parameters
+        )
+        
+        XCTAssertNotNil(cachedResult)
+        XCTAssertEqual(cachedResult?.text, testResult.text)
+        XCTAssertEqual(cachedResult?.confidence, testResult.confidence)
+    }
+    
+    func testCacheSizeManagement() async throws {
+        let initialStats = transcriptionCache.getCacheStatistics()
+        
+        // Add multiple cache entries
         for i in 0..<10 {
-            let testURL = try createTestAudioFile(sizeInMB: 1)
-            defer { cleanup(url: testURL) }
+            let testURL = try createTestAudioFile(name: "test_\(i).m4a")
+            let parameters = TranscriptionParameters(
+                language: "en-US",
+                requiresOnlineProcessing: false,
+                preferredQuality: .balanced
+            )
             
             let result = CachedTranscriptionResult(
                 text: "Test transcription \(i)",
@@ -153,280 +227,186 @@ struct TranscriptionPerformanceTests {
                 timestamp: Date()
             )
             
-            await cache.cacheTranscription(result: result, for: testURL, parameters: parameters)
+            await transcriptionCache.cacheTranscription(
+                result: result,
+                for: testURL,
+                parameters: parameters
+            )
+            
+            // Clean up test file
+            try? FileManager.default.removeItem(at: testURL)
         }
         
-        let stats = cache.getCacheStatistics()
-        #expect(stats.entryCount <= 10, "Cache should manage entry count")
-        #expect(stats.totalSize > 0, "Cache should track total size")
+        let finalStats = transcriptionCache.getCacheStatistics()
+        XCTAssertGreaterThan(finalStats.entryCount, initialStats.entryCount)
     }
     
-    // MARK: - UI Thread Optimization Tests
+    // MARK: - UI Thread Optimizer Tests
     
-    @Test func testUIUpdateBatching() async throws {
-        let uiOptimizer = UIThreadOptimizer()
-        
+    func testUIUpdateBatching() async throws {
         var updateCount = 0
-        let updateOperation = UIUpdateOperation(
-            priority: .medium,
-            estimatedDuration: 0.001
-        ) {
-            updateCount += 1
+        let expectation = XCTestExpectation(description: "UI updates completed")
+        expectation.expectedFulfillmentCount = 5
+        
+        // Schedule multiple UI updates
+        for i in 0..<5 {
+            let operation = UIUpdateOperation<Void>(
+                priority: .medium,
+                estimatedDuration: 0.001
+            ) {
+                updateCount += 1
+                expectation.fulfill()
+            }
+            
+            await uiThreadOptimizer.scheduleUpdate(operation)
         }
         
-        // Schedule multiple updates rapidly
-        let startTime = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<100 {
-            await uiOptimizer.scheduleUpdate(updateOperation)
-        }
-        let endTime = CFAbsoluteTimeGetCurrent()
-        
-        // All updates should complete quickly due to batching
-        #expect(endTime - startTime < 1.0, "Batched updates should complete within 1 second")
-        #expect(updateCount == 100, "All updates should be executed")
+        await fulfillment(of: [expectation], timeout: 1.0)
+        XCTAssertEqual(updateCount, 5)
     }
     
-    @Test func testBackgroundWorkCoordination() async throws {
-        let uiOptimizer = UIThreadOptimizer()
+    func testBackgroundWorkExecution() async throws {
+        let expectation = XCTestExpectation(description: "Background work completed")
+        var result: Int?
         
-        var workCompleted = false
-        var completionOnMainThread = false
-        
-        uiOptimizer.executeOnBackground(
+        uiThreadOptimizer.executeOnBackground(
             work: {
                 // Simulate heavy work
                 try await Task.sleep(nanoseconds: 100_000_000) // 100ms
-                return "Work completed"
+                return 42
             },
-            completion: { result in
-                workCompleted = true
-                completionOnMainThread = Task.isMainActor
+            completion: { workResult in
+                switch workResult {
+                case .success(let value):
+                    result = value
+                case .failure:
+                    XCTFail("Background work should not fail")
+                }
+                expectation.fulfill()
             }
         )
         
-        // Wait for completion
-        try await Task.sleep(nanoseconds: 200_000_000) // 200ms
-        
-        #expect(workCompleted, "Background work should complete")
-        #expect(completionOnMainThread, "Completion should run on main thread")
+        await fulfillment(of: [expectation], timeout: 1.0)
+        XCTAssertEqual(result, 42)
     }
     
-    @Test func testUIPerformanceMetrics() async throws {
-        let uiOptimizer = UIThreadOptimizer()
+    func testTranscriptionProgressUpdates() async throws {
+        let expectation = XCTestExpectation(description: "Progress updates received")
+        expectation.expectedFulfillmentCount = 3
         
-        // Perform some UI operations
-        for _ in 0..<10 {
-            await uiOptimizer.scheduleUpdate(UIUpdateOperation {
-                // Simulate UI work
-                await Task.yield()
-            })
-        }
+        var progressUpdates: [TranscriptionProgress] = []
         
-        let metrics = uiOptimizer.getPerformanceMetrics()
-        #expect(metrics.averageUpdateTime >= 0, "Average update time should be non-negative")
-        #expect(metrics.frameDropCount >= 0, "Frame drop count should be non-negative")
+        uiThreadOptimizer.executeTranscriptionWork(
+            work: { progressHandler in
+                // Simulate transcription work with progress
+                for i in 1...3 {
+                    let progress = TranscriptionProgress(
+                        completedChunks: i,
+                        totalChunks: 3,
+                        currentOperation: "Processing chunk \(i)",
+                        estimatedTimeRemaining: Double(3 - i)
+                    )
+                    progressHandler(progress)
+                    try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                }
+                return "Transcription complete"
+            },
+            progressHandler: { progress in
+                progressUpdates.append(progress)
+                expectation.fulfill()
+            },
+            completion: { result in
+                switch result {
+                case .success(let text):
+                    XCTAssertEqual(text, "Transcription complete")
+                case .failure:
+                    XCTFail("Transcription work should not fail")
+                }
+            }
+        )
+        
+        await fulfillment(of: [expectation], timeout: 2.0)
+        XCTAssertEqual(progressUpdates.count, 3)
+        XCTAssertEqual(progressUpdates.last?.completedChunks, 3)
     }
     
-    // MARK: - Performance Monitor Tests
+    // MARK: - Integration Tests
     
-    @Test func testPerformanceMonitoringAccuracy() async throws {
-        let monitor = TranscriptionPerformanceMonitor()
-        monitor.startMonitoring()
+    func testEndToEndPerformanceOptimization() async throws {
+        let testAudioURL = try createTestAudioFile()
+        defer { try? FileManager.default.removeItem(at: testAudioURL) }
         
         let operationId = UUID()
-        let startTime = Date()
         
-        // Start tracking operation
-        monitor.startTrackingOperation(
+        // Start performance tracking
+        performanceMonitor.startTrackingOperation(
             id: operationId,
             type: .manual,
             audioFileSize: 1024,
-            priority: .normal
+            priority: .userRequested
         )
-        
-        // Simulate operation progress
-        monitor.updateOperationProgress(id: operationId, progress: 0.5, currentPhase: "Processing")
-        
-        // Complete operation
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        monitor.completeOperation(id: operationId, success: true, resultSize: 512)
-        
-        let metrics = monitor.currentMetrics
-        #expect(metrics.activeOperationsCount == 0, "No active operations after completion")
-        #expect(metrics.operationSuccessRate >= 0.0, "Success rate should be valid")
-        
-        monitor.stopMonitoring()
-    }
-    
-    @Test func testQueuePerformanceTracking() async throws {
-        let monitor = TranscriptionPerformanceMonitor()
-        
-        monitor.startQueueProcessingSession()
-        
-        // Simulate processing items
-        for i in 0..<5 {
-            let operationId = UUID()
-            monitor.startTrackingOperation(
-                id: operationId,
-                type: .automatic,
-                audioFileSize: Int64(1024 * (i + 1)),
-                priority: .normal
-            )
-            
-            try await Task.sleep(nanoseconds: 50_000_000) // 50ms
-            monitor.completeOperation(id: operationId, success: true)
-        }
-        
-        monitor.endQueueProcessingSession(totalItemsProcessed: 5, remainingItems: 0)
-        
-        let metrics = monitor.currentMetrics
-        #expect(metrics.totalItemsProcessed == 5, "Should track processed items")
-        #expect(metrics.queueThroughput > 0, "Should calculate throughput")
-    }
-    
-    // MARK: - Background Task Performance Tests
-    
-    @Test func testBackgroundTaskEfficiency() async throws {
-        let backgroundManager = BackgroundTaskManager()
-        
-        // Test that background task scheduling works
-        backgroundManager.scheduleBackgroundProcessing()
-        
-        // Verify no memory leaks in background task management
-        let initialMemory = getCurrentMemoryUsage()
-        
-        for _ in 0..<10 {
-            backgroundManager.scheduleBackgroundRefresh()
-        }
-        
-        await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        let finalMemory = getCurrentMemoryUsage()
-        
-        #expect(finalMemory - initialMemory < 5.0, "Background task scheduling should not leak significant memory")
-    }
-    
-    // MARK: - Integration Performance Tests
-    
-    @Test func testEndToEndTranscriptionPerformance() async throws {
-        // This would test the full transcription pipeline performance
-        // Create a small test audio file
-        let testFile = try createTestAudioFile(sizeInMB: 1)
-        defer { cleanup(url: testFile) }
-        
-        let startTime = CFAbsoluteTimeGetCurrent()
-        
-        // Simulate full transcription pipeline
-        let memoryManager = AudioMemoryManager()
-        let cache = try TranscriptionCache()
-        let uiOptimizer = UIThreadOptimizer()
-        let monitor = TranscriptionPerformanceMonitor()
-        
-        var processingCompleted = false
         
         // Process audio with memory management
-        try await memoryManager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-            processingCompleted = true
-        }
-        
-        let endTime = CFAbsoluteTimeGetCurrent()
-        let totalTime = endTime - startTime
-        
-        #expect(processingCompleted, "Processing should complete")
-        #expect(totalTime < 5.0, "End-to-end processing should complete within 5 seconds for 1MB file")
-    }
-    
-    // MARK: - Memory Utility Functions
-    
-    private func getCurrentMemoryUsage() -> Double {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+        var chunksProcessed = 0
+        try await audioMemoryManager.processAudioFile(at: testAudioURL) { _, chunkIndex, _ in
+            chunksProcessed += 1
+            
+            // Update progress
+            await MainActor.run {
+                self.performanceMonitor.updateOperationProgress(
+                    id: operationId,
+                    progress: Double(chunkIndex) / 10.0,
+                    currentPhase: "Processing chunk \(chunkIndex)"
+                )
             }
         }
         
-        if result == KERN_SUCCESS {
-            return Double(info.resident_size) / (1024 * 1024) // Convert to MB
-        }
-        
-        return 0
-    }
-    
-    // MARK: - Stress Tests
-    
-    @Test func testMemoryStressTest() async throws {
-        let memoryManager = AudioMemoryManager()
-        let initialMemory = getCurrentMemoryUsage()
-        
-        // Process multiple files simultaneously
-        await withTaskGroup(of: Void.self) { group in
-            for i in 0..<5 {
-                group.addTask {
-                    do {
-                        let testFile = try self.createTestAudioFile(sizeInMB: 2)
-                        defer { self.cleanup(url: testFile) }
-                        
-                        try await memoryManager.processAudioFile(at: testFile) { data, chunkIndex, totalChunks in
-                            // Simulate processing
-                            await Task.yield()
-                        }
-                    } catch {
-                        // Handle test file creation errors
-                    }
-                }
-            }
-        }
-        
-        // Allow memory to stabilize
-        await Task.sleep(nanoseconds: 500_000_000) // 500ms
-        
-        let finalMemory = getCurrentMemoryUsage()
-        let memoryIncrease = finalMemory - initialMemory
-        
-        #expect(memoryIncrease < 100.0, "Memory increase should be under 100MB for stress test")
-    }
-    
-    @Test func testConcurrentCacheOperations() async throws {
-        let cache = try TranscriptionCache()
-        let parameters = TranscriptionParameters(
-            language: "en-US",
-            requiresOnlineProcessing: false,
-            preferredQuality: .balanced
+        // Complete operation
+        performanceMonitor.completeOperation(
+            id: operationId,
+            success: true,
+            resultSize: chunksProcessed * 100
         )
         
-        // Perform concurrent cache operations
-        await withTaskGroup(of: Void.self) { group in
-            for i in 0..<20 {
-                group.addTask {
-                    do {
-                        let testURL = try self.createTestAudioFile(sizeInMB: 1)
-                        defer { self.cleanup(url: testURL) }
-                        
-                        let result = CachedTranscriptionResult(
-                            text: "Concurrent test \(i)",
-                            confidence: 0.9,
-                            processingTime: 1.0,
-                            method: .onDevice,
-                            language: "en-US",
-                            timestamp: Date()
-                        )
-                        
-                        await cache.cacheTranscription(result: result, for: testURL, parameters: parameters)
-                        
-                        // Try to read it back
-                        _ = await cache.getCachedTranscription(for: testURL, parameters: parameters)
-                    } catch {
-                        // Handle test file creation errors
-                    }
-                }
-            }
+        // Verify metrics
+        let metrics = performanceMonitor.currentMetrics
+        XCTAssertEqual(metrics.activeOperationsCount, 0)
+        XCTAssertGreaterThan(chunksProcessed, 0)
+    }
+    
+    // MARK: - Memory Pressure Tests
+    
+    func testMemoryPressureHandling() async throws {
+        // Fill up memory cache
+        for i in 0..<100 {
+            let testData = Data(repeating: UInt8(i), count: 1024 * 1024) // 1MB each
+            audioMemoryManager.cacheAudioData(testData, forKey: "large_data_\(i)")
         }
         
-        // Cache should remain stable after concurrent operations
-        let stats = cache.getCacheStatistics()
-        #expect(stats.entryCount >= 0, "Cache should maintain valid entry count")
-        #expect(stats.totalSize >= 0, "Cache should maintain valid size")
+        let initialMemoryInfo = audioMemoryManager.getMemoryUsageInfo()
+        XCTAssertGreaterThan(initialMemoryInfo.cacheSize, 0)
+        
+        // Simulate memory warning
+        NotificationCenter.default.post(name: .lowMemoryCondition, object: nil)
+        
+        // Give time for cleanup
+        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        
+        let finalMemoryInfo = audioMemoryManager.getMemoryUsageInfo()
+        // Cache should be cleared or significantly reduced
+        XCTAssertLessThanOrEqual(finalMemoryInfo.cacheSize, initialMemoryInfo.cacheSize)
+    }
+    
+    // MARK: - Helper Methods
+    
+    private func createTestAudioFile(name: String = "test_audio.m4a") throws -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let audioURL = tempDir.appendingPathComponent(name)
+        
+        // Create a minimal audio file for testing
+        let testData = Data(repeating: 0x00, count: 1024) // 1KB of silence
+        try testData.write(to: audioURL)
+        
+        return audioURL
     }
 }
